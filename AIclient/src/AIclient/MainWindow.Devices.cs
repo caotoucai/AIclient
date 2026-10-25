@@ -15,7 +15,9 @@ public partial class MainWindow
             if (operation == "scan-serial")
             {
                 using var key = Registry.LocalMachine.OpenSubKey(@"HARDWARE\DEVICEMAP\SERIALCOMM");
-                DeviceConfig.Message(key == null ? "未发现本机 COM 口。" : "本机串口：" + string.Join("、", key.GetValueNames().Select(n => key.GetValue(n)?.ToString()))); return;
+                var values = key == null ? [] : key.GetValueNames().Select(n => key.GetValue(n)?.ToString()).OfType<string>().Distinct().OrderBy(v => v).ToArray();
+                DeviceConfig.ShowSerial(values);
+                DeviceConfig.Message(values.Length == 0 ? "未发现本机 COM 口，可手动输入。" : $"发现 {values.Length} 个串口，请选择并绑定。"); return;
             }
             if (operation == "scan-visa")
             {

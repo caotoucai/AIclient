@@ -1131,7 +1131,9 @@ UI 自动检查使用独立 `AICLIENT_DATA_ROOT` 后启动 `AIclient.exe --smoke
 
 ### 21.2 折叠配置与手动设备调用
 
-`DeviceSettingsView` 提供串口表格、总线表单、Power 表单、命令别名表格，`ReadInto` 提交编辑并检测绑定错误，再复制回运行配置。`MainWindow.FillSettings` 同步表单与 JSON；编辑未保存的高级 JSON 不会自动覆盖设备表单。列表允许空白行新增、选中行 Delete 删除。
+`DeviceSettingsView` 参考旧 PowerModule / AdditionalDevice，提供已绑定设备列表、扫描下拉框和绑定/解绑操作。串口通过“新增通道”和行内“解绑”管理，选中通道才显示常用参数；电源支持串口通道与 VISA 仪器，测量仪仅在 VISA 下显示；总线按 CAN / CAN FD / LIN / FlexRay 显示对应参数。命令模板、位时序、手动控制和命令别名默认折叠，命令别名表格仍支持空白行新增和 Delete 删除。
+
+所有绑定/解绑只修改克隆的待保存配置，不打开硬件。解绑串口时停用关联的串口电源，命令别名保留供修改；解绑测量仪恢复电源测量资源回退。切换设备类型与协议保留隐藏的高级参数。`ReadInto` 提交包括折叠内容在内的 TextBox / ComboBox 编辑并检测绑定错误，再复制回运行配置。`MainWindow.FillSettings` 同步表单与 JSON；编辑未保存的高级 JSON 不会自动覆盖设备表单。串口编辑中的无效数值会阻止保存和切换通道。
 
 串口字段为启用、逻辑名、COM、波特率、数据位、校验、停止位、编码和换行。物理 COM 重复在配置校验阶段拒绝。串口发送/关键字等待仍走 `RunDevices.ExecuteAsync` 的 serial.send / serial.expect，原始收发路径保持一致。
 

@@ -2,10 +2,17 @@
 
 最后整理：2026-10-25。此文件用于下次会话快速恢复项目背景；详细实现以源码及 [ARCHITECTURE.md](ARCHITECTURE.md) 为准。
 
-## 2026-10-25 最新续接：Skills 与设备配置
+## 2026-10-25 最新续接：设备设置简化
+
+- 按用户要求参考旧 PowerModule、AdditionalDevice：设备列表、刷新、绑定/解绑；串口选中通道后显示常用参数，“新增通道”代替空白行新增。Power 的独立测量绑定仅在 VISA 下显示。
+- 总线按协议显示 CAN/FD、LIN 或 FlexRay 参数；命令模板、位时序、手动控制及命令别名默认折叠。保留原 DTO、配置格式和可调用方法。
+- 绑定操作只更新待保存配置，不连接硬件；保存前提交折叠字段与可编辑下拉框，非法数值阻止保存。解绑串口停用关联电源，保留命令别名；切换协议保留高级参数。
+- Release 构建通过；47 项软件检查通过，WPF 自检新增 12 项实际界面绑定/解绑、校验与协议切换检查，配置回写通过。产物为 `artifacts/simple-device-checks` 和 `artifacts/simple-device-final-ui`，后者含正常/最小窗口截图。未连接真实硬件。
+
+## 2026-10-25 上轮续接：Skills 与设备配置
 
 - 新增“测试 Skills”页：专用 SKILL.md、手动补充、自动经验开关、经验来源、编辑和删除。`TestSkills` 按台架指纹加载经验；规划/判断均显式注入最新资料并落盘 skills.json。决策新增 lessons；TestRunner 在有效、未取消、未因暂停丢弃的判定之后保存经验，不增加额外 AI 调用。演示不积累。
-- 设备页改为可折叠分组，串口多通道、总线、Power、命令别名可直接编辑，与高级 JSON 同步。表格空白新增行用于新增配置，选中行按 Delete 删除。保存配置与运行前均校验。
+- 设备页改为可折叠分组，串口多通道、总线、Power、命令别名与高级 JSON 同步。最新界面交互见上方“设备设置简化”；保存配置与运行前均校验。
 - Power 支持 serial / visa；VISA 扫描资源、独立电源/测量绑定、输出、设压、电压/电流回读，工具为 power.output / power.voltage / power.measure。真实硬件兼容性待验收。
 - 总线支持 SLCAN 或 Legacy。后者在独立 net48/x86 的 AIclient.DeviceHost 中编译复用 Support/CAN_Library 源码，通过 JSON stdin/stdout 通信，支持 CAN/CAN FD、LIN、FlexRay 的连接及配置报文发送和原始接收。界面含 CAN 速率/高级位时序、LIN 主从/速率/版本、数据库、节点名称和 FlexRay 项目启动帧。
 - 兼容编译通过 scripts/Prepare-LegacySource.ps1 将 CAN_Channel.cs 生成到 obj，替换写死的 FlexRay 启动帧，并去掉连接后的自动唤醒；不修改旧 AT 工程文件。升级旧源码时脚本断言失败须复核。

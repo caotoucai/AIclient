@@ -180,15 +180,24 @@ public partial class MainWindow : Window
         DeviceConfig.Load(sample);
         var roundtrip = new AppSettings(); DeviceConfig.ReadInto(roundtrip);
         var deviceRoundtrip = roundtrip.SerialPorts.Count == 2 && roundtrip.Bus.Protocol == "CAN FD" && roundtrip.Power.MeasurementResource == sample.Power.MeasurementResource && roundtrip.Commands.Single().Alias == "query_status";
+        var deviceBindingChecks = DeviceConfig.CheckBindingWorkflow(sample);
         for (var section = 0; section < 4; section++)
         {
             DeviceConfig.ShowSection(section); await Task.Delay(150);
             SaveWindowScreenshot(Path.Combine(storage.Root, $"device-section-{section}.png"));
         }
+        var originalWidth = Width; var originalHeight = Height;
+        Width = MinWidth; Height = MinHeight;
+        for (var section = 0; section < 3; section++)
+        {
+            DeviceConfig.ShowSection(section); await Task.Delay(150);
+            SaveWindowScreenshot(Path.Combine(storage.Root, $"device-narrow-{section}.png"));
+        }
+        Width = originalWidth; Height = originalHeight;
         Tabs.SelectedIndex = 2;
         await Task.Delay(250);
         var skillsPath = Path.Combine(storage.Root, "skills-smoke.png"); SaveWindowScreenshot(skillsPath);
-        Storage.WriteJson(Path.Combine(storage.Root, "ui-smoke.json"), new { success = result?.Outcome == Outcome.Passed && deviceRoundtrip, deviceRoundtrip, screenshot = path, settingsScreenshot = settingsPath, skillsScreenshot = skillsPath, report = result == null ? "" : Path.Combine(result.Directory, "report.html") });
+        Storage.WriteJson(Path.Combine(storage.Root, "ui-smoke.json"), new { success = result?.Outcome == Outcome.Passed && deviceRoundtrip, deviceRoundtrip, deviceBindingChecks, screenshot = path, settingsScreenshot = settingsPath, skillsScreenshot = skillsPath, report = result == null ? "" : Path.Combine(result.Directory, "report.html") });
         Close();
     }
     private void SaveWindowScreenshot(string path)
