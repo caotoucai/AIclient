@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>AIclient</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../AIclient.DeviceHost/AIclient.DeviceHost.csproj" ReferenceOutputAssembly="false" SkipGetTargetFrameworkProperties="true" />
+    <Content Include="../../skills/test-analysis/SKILL.md" Link="skills/test-analysis/SKILL.md" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../scripts/Invoke-Codex.ps1" Link="scripts/Invoke-Codex.ps1" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

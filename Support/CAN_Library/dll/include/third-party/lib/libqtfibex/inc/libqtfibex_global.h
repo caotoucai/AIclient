@@ -1,0 +1,16 @@
+#ifndef QLIBFIBEX_GLOBAL_H
+#define QLIBFIBEX_GLOBAL_H
+
+#include <QtCore/qglobal.h>
+
+#ifdef LIB_STATIC
+#define QLIBFIBEXSHARED_EXPORT
+#else
+#if defined(QLIBFIBEX_LIBRARY)
+#define QLIBFIBEXSHARED_EXPORT Q_DECL_EXPORT
+#else
+#define QLIBFIBEXSHARED_EXPORT Q_DECL_IMPORT
+#endif
+#endif
+
+#endif // QLIBFIBEX_GLOBAL_H

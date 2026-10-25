@@ -1,0 +1,118 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{8BB40EB2-E6CE-4011-BE25-CED6943C4B14}</ProjectGuid>
+    <OutputType>Library</OutputType>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+    <RootNamespace>CAN_Library</RootNamespace>
+    <AssemblyName>CAN_Library</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <Deterministic>true</Deterministic>
+    <TargetFrameworkProfile />
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug_Server|AnyCPU'">
+    <DebugSymbols>true</DebugSymbols>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>TRACE;DEBUG;Debug_Server</DefineConstants>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DebugType>full</DebugType>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <ErrorReport>prompt</ErrorReport>
+    <CodeAnalysisRuleSet>MinimumRecommendedRules.ruleset</CodeAnalysisRuleSet>
+  </PropertyGroup>
+  <PropertyGroup>
+    <SignAssembly>false</SignAssembly>
+  </PropertyGroup>
+  <PropertyGroup>
+    <AssemblyOriginatorKeyFile>
+    </AssemblyOriginatorKeyFile>
+  </PropertyGroup>
+  <PropertyGroup>
+    <DelaySign>false</DelaySign>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Log_Function, Version=1.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <SpecificVersion>False</SpecificVersion>
+      <HintPath>..\Log_Function\bin\Debug\Log_Function.dll</HintPath>
+    </Reference>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Data.DataSetExtensions" />
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Xml" />
+    <Reference Include="vxlapi_NET">
+      <HintPath>dll\vxlapi_NET.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="CAN_Driver\CAN_Driver.cs" />
+    <Compile Include="CAN_Driver\CAN_Driver_Sapa.cs" />
+    <Compile Include="CAN_Driver\CAN_Driver_Spy3.cs" />
+    <Compile Include="CAN_Driver\CAN_Driver_Vector.cs" />
+    <Compile Include="CAN_Driver\CAN_Driver_Saint.cs" />
+    <Compile Include="CAN_Driver\CAN_Driver_ZLG.cs" />
+    <Compile Include="CAN_Driver\FlexRay_Driver.cs" />
+    <Compile Include="CAN_Driver\FlexRay_Driver_Sapa.cs" />
+    <Compile Include="CAN_Driver\FlexRay_Driver_Vector.cs" />
+    <Compile Include="CAN_Driver\LINDriver_Sapa.cs" />
+    <Compile Include="CAN_Driver\LINDriver_Spy3.cs" />
+    <Compile Include="CAN_Driver\LINDriver_Saint.cs" />
+    <Compile Include="CAN_Driver\LINDriver_Vector.cs" />
+    <Compile Include="CAN_Driver\LIN_Driver.cs" />
+    <Compile Include="CAN_Interface\CAN_Channel.cs" />
+    <Compile Include="CAN_Interface\CAN_Interface.cs" />
+    <Compile Include="CAN_Interface\CAN_Manager.cs" />
+    <Compile Include="CAN_Interface\Ether_Channel.cs" />
+    <Compile Include="CAN_Interface\Labview_Interface.cs" />
+    <Compile Include="CAN_Parameter\CAN_Message.cs" />
+    <Compile Include="CAN_Parameter\Diag_DID.cs" />
+    <Compile Include="CAN_Parameter\Eth_Message.cs" />
+    <Compile Include="CAN_Parameter\FlexRay_Message.cs" />
+    <Compile Include="CAN_Parameter\IMessage.cs" />
+    <Compile Include="CAN_Parameter\ISignal.cs" />
+    <Compile Include="CAN_Parameter\LIN_Message.cs" />
+    <Compile Include="CAN_Parameter\Monitor_Message.cs" />
+    <Compile Include="CAN_Refer\config.cs" />
+    <Compile Include="CAN_Refer\FibexParser.cs" />
+    <Compile Include="CAN_Refer\FlexRayConfig.cs" />
+    <Compile Include="CAN_Refer\icsNeoClass.cs" />
+    <Compile Include="CAN_Refer\recvdatathread.cs" />
+    <Compile Include="CAN_Refer\SapaNativeWraper.cs" />
+    <Compile Include="CAN_Refer\SBE2Connection.cs" />
+    <Compile Include="CAN_Refer\zlgcan.cs" />
+    <Compile Include="Log.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="DLL\vxlapi_NET.dll" />
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>

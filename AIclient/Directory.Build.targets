@@ -1,0 +1,6 @@
+<Project>
+  <Target Name="CopyDeviceHost" AfterTargets="Build" Condition="'$(MSBuildProjectName)' == 'AIclient' Or '$(MSBuildProjectName)' == 'AIclient.Checks'">
+    <ItemGroup><DeviceHostFiles Include="$(MSBuildThisFileDirectory)src/AIclient.DeviceHost/bin/$(Configuration)/net48/**/*" /></ItemGroup>
+    <Copy SourceFiles="@(DeviceHostFiles)" DestinationFiles="@(DeviceHostFiles->'$(TargetDir)device-host/%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+  </Target>
+</Project>

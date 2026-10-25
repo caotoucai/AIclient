@@ -1,0 +1,105 @@
+<UserControl x:Class="AIclient.DeviceSettingsView" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <StackPanel>
+    <TextBlock Text="配置启用后参与真实测试，保存后与高级 JSON 同步。手动调用也会保存原始证据和报告。" TextWrapping="Wrap" Foreground="{StaticResource Muted}" Margin="0,0,0,14"/>
+    <Expander x:Name="SerialExpander" Header="串口 · 多通道与收发参数" IsExpanded="True" Margin="0,0,0,16">
+      <StackPanel Margin="12">
+        <TextBlock Text="配置逻辑名称、COM、波特率、数据位、校验、停止位、编码和换行。换行输入支持 \r\n、\n。" TextWrapping="Wrap" Margin="0,0,0,10"/>
+        <DataGrid x:Name="SerialGrid" AutoGenerateColumns="False" CanUserAddRows="True" CanUserDeleteRows="True" MinHeight="130" MaxHeight="250" HorizontalScrollBarVisibility="Auto">
+          <DataGrid.Columns>
+            <DataGridCheckBoxColumn Header="启用" Binding="{Binding Enabled}"/>
+            <DataGridTextColumn Header="逻辑名称" Binding="{Binding Name}" Width="110"/>
+            <DataGridTextColumn Header="COM" Binding="{Binding Port}" Width="85"/>
+            <DataGridTextColumn Header="波特率" Binding="{Binding BaudRate}" Width="90"/>
+            <DataGridTextColumn Header="数据位" Binding="{Binding DataBits}" Width="65"/>
+            <DataGridComboBoxColumn Header="校验" x:Name="ParityColumn" SelectedItemBinding="{Binding Parity}" ElementStyle="{StaticResource GridComboDisplay}" Width="90"/>
+            <DataGridTextColumn Header="停止位" Binding="{Binding StopBits}" Width="65"/>
+            <DataGridTextColumn Header="编码" Binding="{Binding Encoding}" Width="90"/>
+            <DataGridTextColumn Header="换行" Binding="{Binding NewLine, Converter={x:Static local:DeviceSettingsView.EscapedNewLine}}" Width="85" xmlns:local="clr-namespace:AIclient"/>
+          </DataGrid.Columns>
+        </DataGrid>
+        <WrapPanel Margin="0,10,0,0"><Button Content="扫描本机 COM" Tag="scan-serial" Click="ActionClick"/><Button Content="连接与采集自检" Tag="preflight" Click="ActionClick"/></WrapPanel>
+      </StackPanel>
+    </Expander>
+    <Expander x:Name="BusExpander" Header="车辆总线 · CAN / CAN FD / LIN / FlexRay" Margin="0,0,0,16">
+      <StackPanel Margin="12">
+        <CheckBox Content="启用总线" IsChecked="{Binding Bus.Enabled}" Margin="0,0,0,10"/>
+        <WrapPanel>
+          <StackPanel Width="180" Margin="0,0,12,10"><TextBlock Text="适配器"/><ComboBox x:Name="AdapterBox" SelectedItem="{Binding Bus.Adapter}"/></StackPanel>
+          <StackPanel Width="180" Margin="0,0,12,10"><TextBlock Text="协议"/><ComboBox x:Name="ProtocolBox" SelectedItem="{Binding Bus.Protocol}"/></StackPanel>
+          <StackPanel Width="220" Margin="0,0,12,10"><TextBlock Text="SLCAN COM"/><TextBox Text="{Binding Bus.Serial.Port}"/></StackPanel>
+          <StackPanel Width="180" Margin="0,0,12,10"><TextBlock Text="SLCAN 串口波特率"/><TextBox Text="{Binding Bus.Serial.BaudRate}"/></StackPanel>
+          <StackPanel Width="180" Margin="0,0,12,10"><TextBlock Text="CAN 仲裁速率（bit/s）"/><TextBox Text="{Binding Bus.BitRate}"/></StackPanel>
+          <StackPanel Width="180" Margin="0,0,12,10"><TextBlock Text="CAN FD 数据速率（bit/s）"/><TextBox Text="{Binding Bus.DataRate}"/></StackPanel>
+          <StackPanel Width="180" Margin="0,0,12,10"><TextBlock Text="LIN 波特率"/><ComboBox x:Name="LinBaudBox" SelectedItem="{Binding Bus.LinBaud}"/></StackPanel>
+          <StackPanel Width="180" Margin="0,0,12,10"><TextBlock Text="LIN 版本"/><ComboBox x:Name="LinVersionBox" SelectedItem="{Binding Bus.LinVersion}"/></StackPanel>
+          <CheckBox Content="LIN 主节点" IsChecked="{Binding Bus.LinMaster}" Margin="0,0,12,10"/>
+          <StackPanel Width="220" Margin="0,0,12,10"><TextBlock Text="FlexRay E-Ray 启动帧名"/><TextBox Text="{Binding Bus.ErayFrame}"/></StackPanel>
+          <StackPanel Width="220" Margin="0,0,12,10"><TextBlock Text="FlexRay Cold 启动帧名"/><TextBox Text="{Binding Bus.ColdFrame}"/></StackPanel>
+          <StackPanel Width="220" Margin="0,0,12,10"><TextBlock Text="本机节点 / ECU 名称"/><TextBox Text="{Binding Bus.NodeName}"/></StackPanel>
+        </WrapPanel>
+        <Expander Header="CAN 高级位时序（Legacy）" Margin="0,0,0,10">
+          <StackPanel Margin="10">
+            <CheckBox Content="使用自定义位时序（关闭时使用驱动默认值）" IsChecked="{Binding Bus.Timing.Enabled}" Margin="0,0,0,10"/>
+            <WrapPanel>
+              <StackPanel Width="145" Margin="0,0,10,10"><TextBlock Text="时钟 MHz"/><TextBox Text="{Binding Bus.Timing.ClockMHz}"/></StackPanel>
+              <StackPanel Width="145" Margin="0,0,10,10"><TextBlock Text="仲裁 BRP"/><TextBox Text="{Binding Bus.Timing.ArbitrationBrp}"/></StackPanel>
+              <StackPanel Width="145" Margin="0,0,10,10"><TextBlock Text="仲裁 TSEG1"/><TextBox Text="{Binding Bus.Timing.ArbitrationTseg1}"/></StackPanel>
+              <StackPanel Width="145" Margin="0,0,10,10"><TextBlock Text="仲裁 TSEG2"/><TextBox Text="{Binding Bus.Timing.ArbitrationTseg2}"/></StackPanel>
+              <StackPanel Width="145" Margin="0,0,10,10"><TextBlock Text="仲裁 SJW"/><TextBox Text="{Binding Bus.Timing.ArbitrationSjw}"/></StackPanel>
+              <StackPanel Width="145" Margin="0,0,10,10"><TextBlock Text="数据 BRP"/><TextBox Text="{Binding Bus.Timing.DataBrp}"/></StackPanel>
+              <StackPanel Width="145" Margin="0,0,10,10"><TextBlock Text="数据 TSEG1"/><TextBox Text="{Binding Bus.Timing.DataTseg1}"/></StackPanel>
+              <StackPanel Width="145" Margin="0,0,10,10"><TextBlock Text="数据 TSEG2"/><TextBox Text="{Binding Bus.Timing.DataTseg2}"/></StackPanel>
+              <StackPanel Width="145" Margin="0,0,10,10"><TextBlock Text="数据 SJW"/><TextBox Text="{Binding Bus.Timing.DataSjw}"/></StackPanel>
+            </WrapPanel>
+          </StackPanel>
+        </Expander>
+        <TextBlock Text="旧库设备完整名称（扫描后选择，也可手工填写）"/><ComboBox x:Name="LegacyDeviceBox" IsEditable="True" Text="{Binding Bus.DeviceName, UpdateSourceTrigger=PropertyChanged}" Margin="0,6,0,10"/>
+        <TextBlock Text="数据库路径：CAN/CAN FD 用 DBC，LIN 用 LDF，FlexRay 用 FIBEX"/><TextBox Text="{Binding Bus.DbcPath}" Margin="0,6,0,10"/>
+        <TextBlock Text="Legacy 复用原 AT 总线库，需对应厂商驱动及硬件。接收帧保存原始记录；bus.expect 当前只支持 CAN/CAN FD 基本 DBC 标量。" TextWrapping="Wrap" Foreground="{StaticResource Muted}"/>
+        <WrapPanel Margin="0,10,0,0"><Button Content="扫描旧库总线设备" Tag="scan-bus" Click="ActionClick"/><Button Content="连接与采集自检" Tag="preflight" Click="ActionClick"/></WrapPanel>
+      </StackPanel>
+    </Expander>
+    <Expander x:Name="PowerExpander" Header="Power · 电源与测量设备" Margin="0,0,0,16">
+      <StackPanel Margin="12">
+        <CheckBox Content="启用电源" IsChecked="{Binding Power.Enabled}" Margin="0,0,0,10"/>
+        <WrapPanel>
+          <StackPanel Width="180" Margin="0,0,12,10"><TextBlock Text="传输方式"/><ComboBox x:Name="PowerTransportBox" SelectedItem="{Binding Power.Transport}"/></StackPanel>
+          <StackPanel Width="180" Margin="0,0,12,10"><TextBlock Text="串口逻辑通道"/><TextBox Text="{Binding Power.Channel}"/></StackPanel>
+          <StackPanel Width="180" Margin="0,0,12,10"><TextBlock Text="最低电压（V）"/><TextBox Text="{Binding Power.MinVoltage}"/></StackPanel>
+          <StackPanel Width="180" Margin="0,0,12,10"><TextBlock Text="最高电压（V）"/><TextBox Text="{Binding Power.MaxVoltage}"/></StackPanel>
+          <StackPanel Width="180" Margin="0,0,12,10"><TextBlock Text="VISA 超时（ms）"/><TextBox Text="{Binding Power.TimeoutMs}"/></StackPanel>
+        </WrapPanel>
+        <TextBlock Text="电源 VISA 资源"/><ComboBox x:Name="PowerResourceBox" IsEditable="True" Text="{Binding Power.Resource, UpdateSourceTrigger=PropertyChanged}" Margin="0,6,0,10"/>
+        <TextBlock Text="测量 VISA 资源（留空复用电源，可绑定独立万用表）"/><ComboBox x:Name="MeasurementResourceBox" IsEditable="True" Text="{Binding Power.MeasurementResource, UpdateSourceTrigger=PropertyChanged}" Margin="0,6,0,10"/>
+        <WrapPanel>
+          <StackPanel Width="230" Margin="0,0,12,10"><TextBlock Text="输出开启命令"/><TextBox Text="{Binding Power.OnCommand}"/></StackPanel>
+          <StackPanel Width="230" Margin="0,0,12,10"><TextBlock Text="输出关闭命令"/><TextBox Text="{Binding Power.OffCommand}"/></StackPanel>
+          <StackPanel Width="230" Margin="0,0,12,10"><TextBlock Text="设压模板（含 {value}）"/><TextBox Text="{Binding Power.VoltageCommand}"/></StackPanel>
+          <StackPanel Width="230" Margin="0,0,12,10"><TextBlock Text="电压回读命令"/><TextBox Text="{Binding Power.VoltageQuery}"/></StackPanel>
+          <StackPanel Width="230" Margin="0,0,12,10"><TextBlock Text="电流回读命令"/><TextBox Text="{Binding Power.CurrentQuery}"/></StackPanel>
+        </WrapPanel>
+        <TextBlock Text="命令需按仪器协议配置。连接时不自动开启输出；回读保存仪器原始响应。" TextWrapping="Wrap" Foreground="{StaticResource Muted}"/>
+        <WrapPanel Margin="0,10,0,0"><Button Content="扫描 VISA 资源" Tag="scan-visa" Click="ActionClick"/><Button Content="输出开启" Tag="power-on" Click="ActionClick"/><Button Content="输出关闭" Tag="power-off" Click="ActionClick"/><TextBox x:Name="ManualVoltageBox" Text="12" Width="80" Margin="0,0,8,0"/><Button Content="设置电压" Tag="power-set" Click="ActionClick"/><Button Content="读取电压" Tag="power-voltage" Click="ActionClick"/><Button Content="读取电流" Tag="power-current" Click="ActionClick"/></WrapPanel>
+      </StackPanel>
+    </Expander>
+    <Expander x:Name="CommandsExpander" Header="设备方法 · 串口 / 总线命令别名" Margin="0,0,0,16">
+      <StackPanel Margin="12">
+        <TextBlock Text="AI 只调用此表已配置的别名。serial 负载按编码/十六进制发送；SLCAN 总线使用 t1232AABB 格式；Legacy 总线填写报文 ID（十进制）和十六进制负载，FlexRay 另填帧名。" TextWrapping="Wrap" Margin="0,0,0,10"/>
+        <DataGrid x:Name="CommandsGrid" AutoGenerateColumns="False" CanUserAddRows="True" CanUserDeleteRows="True" MinHeight="130" MaxHeight="240" HorizontalScrollBarVisibility="Auto">
+          <DataGrid.Columns>
+            <DataGridTextColumn Header="别名" Binding="{Binding Alias}" Width="130"/>
+            <DataGridTextColumn Header="说明" Binding="{Binding Description}" Width="200"/>
+            <DataGridComboBoxColumn Header="传输" x:Name="CommandTransportColumn" SelectedItemBinding="{Binding Transport}" ElementStyle="{StaticResource GridComboDisplay}" Width="90"/>
+            <DataGridTextColumn Header="串口逻辑通道" Binding="{Binding Channel}" Width="120"/>
+            <DataGridTextColumn Header="负载" Binding="{Binding Payload}" Width="170"/>
+            <DataGridCheckBoxColumn Header="HEX" Binding="{Binding Hex}"/>
+            <DataGridTextColumn Header="报文 ID" Binding="{Binding FrameId}" Width="90"/>
+            <DataGridTextColumn Header="FlexRay 帧名" Binding="{Binding FrameName}" Width="130"/>
+          </DataGrid.Columns>
+        </DataGrid>
+        <Button Content="调用选中的命令" Tag="send-alias" Click="ActionClick" HorizontalAlignment="Left" Margin="0,10,0,0"/>
+      </StackPanel>
+    </Expander>
+    <WrapPanel><Button Content="保存设备配置" Tag="save" Click="ActionClick" Background="#207F70"/><TextBlock x:Name="DeviceMessage" TextWrapping="Wrap" MaxWidth="800" VerticalAlignment="Center"/></WrapPanel>
+  </StackPanel>
+</UserControl>

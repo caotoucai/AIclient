@@ -1,0 +1,91 @@
+<Window x:Class="AIclient.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:local="clr-namespace:AIclient" Title="AIclient · 智能联调测试" Width="1440" Height="960" MinWidth="1120" MinHeight="780" Background="{StaticResource Bg}" Foreground="{StaticResource Ink}" FontFamily="Microsoft YaHei UI, Segoe UI" FontSize="13" WindowStartupLocation="CenterScreen" Closing="OnClosing">
+  <Grid Margin="26,20,26,16">
+    <Grid.RowDefinitions><RowDefinition Height="78"/><RowDefinition Height="*"/><RowDefinition Height="30"/></Grid.RowDefinitions>
+    <Grid>
+      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+      <StackPanel><StackPanel Orientation="Horizontal"><Border Background="#59D8BD" CornerRadius="8" Padding="10,5" Margin="0,0,12,0"><TextBlock Text="AI" FontWeight="Bold" FontSize="20" Foreground="#102522"/></Border><TextBlock Text="AIclient" FontSize="27" FontWeight="SemiBold" VerticalAlignment="Center"/><TextBlock Text="ADB 设备 · 智能联调测试" Foreground="{StaticResource Muted}" Margin="20,0,0,0" VerticalAlignment="Center"/></StackPanel><TextBlock Text="从一句测试需求，到可复核的每一步证据。" Foreground="{StaticResource Muted}" Margin="0,9,0,0"/></StackPanel>
+      <StackPanel Grid.Column="1" HorizontalAlignment="Right"><Border Background="#1D3441" CornerRadius="12" Padding="14,6"><TextBlock x:Name="StatusBadge" Text="●  本地工作台就绪" Foreground="#71DFC7"/></Border><TextBlock x:Name="BindingSummary" Text="PowerShell + 本机 Codex" HorizontalAlignment="Right" Margin="0,9,0,0" Foreground="{StaticResource Muted}" FontSize="11"/></StackPanel>
+    </Grid>
+    <TabControl x:Name="Tabs" Grid.Row="1">
+      <TabItem Header="测试工作台">
+        <Grid>
+          <Grid.ColumnDefinitions><ColumnDefinition Width="1.2*"/><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+          <Grid>
+            <Grid.RowDefinitions><RowDefinition Height="218"/><RowDefinition Height="14"/><RowDefinition Height="*"/><RowDefinition Height="14"/><RowDefinition Height="185"/></Grid.RowDefinitions>
+            <Border Background="{StaticResource Panel}" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="12" Padding="20">
+              <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <DockPanel><TextBlock Text="描述你的测试需求" FontSize="18" FontWeight="SemiBold"/><CheckBox x:Name="DemoToggle" Content="演示模式" IsChecked="True" DockPanel.Dock="Right" HorizontalAlignment="Right" ToolTip="不调用 Codex，不操作真实设备"/></DockPanel>
+                <TextBox x:Name="RequestBox" Grid.Row="1" Margin="0,14,0,14" Text="帮我测试 ADB1 与 ADB2 的蓝牙配对、连接、断开和重连是否正常。" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" FontSize="14"/>
+                <StackPanel Grid.Row="2" Orientation="Horizontal"><Button x:Name="StartButton" Content="生成计划并运行  →" Background="#207F70" BorderBrush="#3BAE99" Click="StartClick"/><Button x:Name="PauseButton" Content="暂停" IsEnabled="False" Click="PauseClick"/><Button x:Name="StopButton" Content="停止" IsEnabled="False" Background="#493039" Click="StopClick"/></StackPanel>
+              </Grid>
+            </Border>
+            <Border Grid.Row="2" Background="{StaticResource Panel}" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="12" Padding="18">
+              <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                <DockPanel><TextBlock Text="测试计划与步骤" FontSize="17" FontWeight="SemiBold"/><TextBlock x:Name="StepCount" Text="等待任务" DockPanel.Dock="Right" HorizontalAlignment="Right" Foreground="{StaticResource Muted}"/></DockPanel>
+                <TextBlock x:Name="ScopeText" Grid.Row="1" Text="生成计划后自动执行。每次操作后重新截图，判断实际状态。" TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,8,0,12" MaxHeight="44" TextTrimming="CharacterEllipsis"/>
+                <ListBox x:Name="StepsList" Grid.Row="2"><ListBox.ItemTemplate><DataTemplate><Border Background="#1C2A3F" CornerRadius="8" Padding="12"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="46"/><ColumnDefinition Width="*"/><ColumnDefinition Width="74"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Id}" Foreground="#75D9C4" FontWeight="SemiBold"/><StackPanel Grid.Column="1"><TextBlock Text="{Binding Title}" TextWrapping="Wrap" FontWeight="SemiBold"/><TextBlock Text="{Binding Detail}" Foreground="#99ACC5" FontSize="11" TextWrapping="Wrap" MaxHeight="40" Margin="0,5,8,0"/></StackPanel><TextBlock Grid.Column="2" Text="{Binding Status}" Foreground="{Binding Color}" FontSize="11" HorizontalAlignment="Right"/></Grid></Border></DataTemplate></ListBox.ItemTemplate></ListBox>
+              </Grid>
+            </Border>
+            <Border Grid.Row="4" Background="{StaticResource Panel}" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="12" Padding="16,12">
+              <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions><TextBlock Text="运行日志" FontWeight="SemiBold"/><TextBox x:Name="LogBox" Grid.Row="1" Background="Transparent" BorderThickness="0" IsReadOnly="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" FontFamily="Consolas, Microsoft YaHei UI" FontSize="11" Padding="0,10,0,0" Foreground="#9FB8D1"/></Grid>
+            </Border>
+          </Grid>
+          <Border Grid.Column="2" Background="{StaticResource Panel}" BorderBrush="{StaticResource Line}" BorderThickness="1" CornerRadius="12" Padding="20">
+            <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="1.1*"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+              <DockPanel><TextBlock Text="实时设备观察" FontSize="18" FontWeight="SemiBold"/><TextBlock x:Name="EvidenceCount" Text="0 个证据" DockPanel.Dock="Right" HorizontalAlignment="Right" Foreground="#6DDBC3"/></DockPanel>
+              <TextBlock x:Name="Adb1Caption" Grid.Row="1" Text="ADB1  /  等待截图" Foreground="{StaticResource Muted}" Margin="0,18,0,10"/>
+              <Border Grid.Row="2" Background="#0C1524" CornerRadius="8" BorderBrush="{StaticResource Line}" BorderThickness="1"><Grid><TextBlock Text="ADB1&#x0a;运行后显示设备截图" Foreground="#526985" TextAlignment="Center" VerticalAlignment="Center"/><Image x:Name="Adb1Image" Stretch="Uniform" Margin="6"/></Grid></Border>
+              <TextBlock x:Name="Adb2Caption" Grid.Row="3" Text="ADB2  /  等待截图" Foreground="{StaticResource Muted}" Margin="0,16,0,10"/>
+              <Border Grid.Row="4" Background="#0C1524" CornerRadius="8" BorderBrush="{StaticResource Line}" BorderThickness="1"><Grid><TextBlock Text="ADB2&#x0a;运行后显示设备截图" Foreground="#526985" TextAlignment="Center" VerticalAlignment="Center"/><Image x:Name="Adb2Image" Stretch="Uniform" Margin="6"/></Grid></Border>
+              <TextBlock x:Name="ObservationText" Grid.Row="5" Text="等待开始。截图、操作和日志会自动关联到对应步骤。" TextWrapping="Wrap" Foreground="#9DB2CB" FontSize="12" Margin="0,16,0,14" MaxHeight="68"/>
+              <StackPanel Grid.Row="6" Orientation="Horizontal"><Button x:Name="ReportButton" Content="打开本地报告 ↗" Click="ReportClick" IsEnabled="False"/><Button x:Name="FolderButton" Content="证据文件夹" Click="FolderClick" IsEnabled="False"/></StackPanel>
+            </Grid>
+          </Border>
+        </Grid>
+      </TabItem>
+      <TabItem Header="设备与设置">
+        <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel x:Name="SettingsPanel" Margin="0,0,12,0">
+          <Expander x:Name="CodexExpander" Header="Codex、ADB 与台架背景" Background="{StaticResource Panel}" Padding="22" Margin="0,0,0,14"><StackPanel><TextBlock Text="本地 Codex 与 ADB" FontSize="20" FontWeight="SemiBold"/><TextBlock Text="沿用本机 Codex 登录。模型留空时继承现有配置；实际额度取决于本地登录账号权益。" Foreground="{StaticResource Muted}" Margin="0,8,0,18"/>
+            <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions><Grid.RowDefinitions><RowDefinition Height="48"/><RowDefinition Height="48"/><RowDefinition Height="48"/></Grid.RowDefinitions>
+              <TextBlock Text="Codex 路径" VerticalAlignment="Center"/><TextBox x:Name="CodexPathBox" Grid.Column="1" Margin="0,3,18,3"/>
+              <TextBlock Text="PowerShell 路径" Grid.Column="2" VerticalAlignment="Center"/><TextBox x:Name="PowerShellBox" Grid.Column="3" Margin="0,3,0,3"/>
+              <TextBlock Text="ADB 路径" Grid.Row="1" VerticalAlignment="Center"/><TextBox x:Name="AdbPathBox" Grid.Row="1" Grid.Column="1" Margin="0,3,18,3"/>
+              <TextBlock Text="模型（可留空）" Grid.Row="1" Grid.Column="2" VerticalAlignment="Center"/><TextBox x:Name="ModelBox" Grid.Row="1" Grid.Column="3" Margin="0,3,0,3"/>
+              <TextBlock Text="ADB1 serial" Grid.Row="2" VerticalAlignment="Center"/><TextBox x:Name="Adb1Box" Grid.Row="2" Grid.Column="1" Margin="0,3,18,3"/>
+              <TextBlock Text="ADB2 serial" Grid.Row="2" Grid.Column="2" VerticalAlignment="Center"/><TextBox x:Name="Adb2Box" Grid.Row="2" Grid.Column="3" Margin="0,3,0,3"/>
+            </Grid>
+            <StackPanel Orientation="Horizontal" Margin="0,16,0,12"><Button Content="扫描 ADB 设备" Click="ScanClick"/><Button Content="绑定选中设备为 ADB1" Click="BindAdb1Click"/><Button Content="绑定选中设备为 ADB2" Click="BindAdb2Click"/><Button Content="检测 Codex 登录" Click="CheckCodexClick"/></StackPanel>
+            <TextBlock Text="ADB1 / ADB2 仅为设备编号，可同时绑定两台手机。通常 ADB1 用于车机、ADB2 用于手机，实际用途以测试需求和画面为准。" Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,0,0,12"/>
+            <ListBox x:Name="AdbScanList" Height="82" Background="#0C1524"/>
+            <TextBlock Text="台架与测试背景（蓝牙名称、前置状态、允许测试的范围等）" Margin="0,18,0,8"/>
+            <TextBox x:Name="ContextBox" Height="100" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+            <StackPanel Orientation="Horizontal" Margin="0,14,0,0"><Button Content="保存基础设置" Background="#207F70" Click="SaveSettingsClick"/><TextBlock x:Name="SettingsMessage" VerticalAlignment="Center" Foreground="#6DDBC3" TextWrapping="Wrap"/></StackPanel>
+          </StackPanel></Expander>
+          <Border Background="{StaticResource Panel}" CornerRadius="12" Padding="22" Margin="0,0,0,14"><local:DeviceSettingsView x:Name="DeviceConfig"/></Border>
+          <Expander Header="高级 JSON 与执行预算" Background="{StaticResource Panel}" Padding="22"><StackPanel><TextBlock Text="设备协议与执行预算" FontSize="20" FontWeight="SemiBold"/><TextBlock Text="首版使用 JSON 配置串口、SLCAN、串口电源和命令别名。编辑后点击“应用 JSON 设置”；基础设置会同步更新。" Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,8,0,12"/><TextBox x:Name="AdvancedBox" Height="360" AcceptsReturn="True" AcceptsTab="True" FontFamily="Consolas" FontSize="12" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"/><StackPanel Orientation="Horizontal" Margin="0,14,0,0"><Button Content="应用 JSON 设置" Click="ApplyJsonClick"/><Button Content="载入设备配置示例" Click="ExampleClick"/></StackPanel></StackPanel></Expander>
+        </StackPanel></ScrollViewer>
+      </TabItem>
+      <TabItem Header="测试 Skills">
+        <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="0,0,12,0">
+          <TextBlock Text="测试分析技能与经验库" FontSize="22" FontWeight="SemiBold"/>
+          <TextBlock Text="保存后从下一次 Codex 分析生效。自动经验按设备绑定和台架配置匹配，每次调用保留技能快照；仍需结合当前证据判断。" TextWrapping="Wrap" Foreground="{StaticResource Muted}" Margin="0,10,0,16"/>
+          <Expander Header="测试专用 SKILL.md" Margin="0,0,0,14"><TextBox x:Name="SkillBaseBox" IsReadOnly="True" Height="230" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/></Expander>
+          <TextBlock Text="手动补充项目知识、特殊情况和处理方法" FontSize="17" Margin="0,0,0,10"/>
+          <TextBox x:Name="SkillManualBox" Height="190" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+          <WrapPanel Margin="0,12,0,16"><Button Content="保存手动补充" Click="SaveSkillsClick"/><CheckBox x:Name="AutoLearnToggle" Content="测试中自动积累有证据来源的经验" Checked="AutoLearnChanged" Unchecked="AutoLearnChanged"/></WrapPanel>
+          <TextBlock x:Name="SkillsMessage" TextWrapping="Wrap" Foreground="#6DDBC3" Margin="0,0,0,14"/>
+          <DockPanel><TextBlock Text="自动积累的经验（所有台架）" FontSize="17"/><Button Content="刷新经验" Click="RefreshSkillsClick" HorizontalAlignment="Right"/></DockPanel>
+          <ListBox x:Name="LessonsList" Height="150" DisplayMemberPath="Display" SelectionChanged="LessonSelected" Margin="0,10,0,10"/>
+          <TextBlock x:Name="LessonSource" TextWrapping="Wrap" Foreground="{StaticResource Muted}" Margin="0,0,0,10"/>
+          <TextBlock Text="适用条件"/><TextBox x:Name="LessonConditionBox" Height="60" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Margin="0,6,0,10"/>
+          <TextBlock Text="观察事实与处理建议"/><TextBox x:Name="LessonGuidanceBox" Height="110" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Margin="0,6,0,10"/>
+          <WrapPanel><Button Content="保存选中经验" Click="EditLessonClick"/><Button Content="删除选中经验" Click="DeleteLessonClick"/></WrapPanel>
+        </StackPanel></ScrollViewer>
+      </TabItem>
+      <TabItem Header="本地运行记录">
+        <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions><StackPanel Orientation="Horizontal" Margin="0,5,0,18"><Button Content="刷新记录" Click="RefreshHistoryClick"/><Button Content="打开选中报告" Click="OpenHistoryReportClick"/><Button Content="打开选中证据目录" Click="OpenHistoryFolderClick"/><TextBlock Text="所有记录保存在本地，演示与真实运行分别标识。" Foreground="{StaticResource Muted}" VerticalAlignment="Center" Margin="12,0,0,0"/></StackPanel><ListBox x:Name="HistoryList" Grid.Row="1"><ListBox.ItemTemplate><DataTemplate><Border Background="#1A283D" CornerRadius="10" Padding="20"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="160"/></Grid.ColumnDefinitions><StackPanel><TextBlock Text="{Binding Title}" FontSize="17"/><TextBlock Text="{Binding Detail}" Foreground="#99ACC5" Margin="0,7,0,0" TextWrapping="Wrap"/></StackPanel><TextBlock Grid.Column="1" Text="{Binding Status}" Foreground="#6ADBC1" HorizontalAlignment="Right"/></Grid></Border></DataTemplate></ListBox.ItemTemplate></ListBox></Grid>
+      </TabItem>
+    </TabControl>
+    <DockPanel Grid.Row="2" Margin="0,10,0,0"><TextBlock x:Name="FooterText" Text="本地优先 · Evidence 可追溯 · HTML 报告" Foreground="#657D9A" FontSize="11"/><TextBlock Text="AIclient 0.1  /  Windows" Foreground="#657D9A" FontSize="11" DockPanel.Dock="Right" HorizontalAlignment="Right"/></DockPanel>
+  </Grid>
+</Window>

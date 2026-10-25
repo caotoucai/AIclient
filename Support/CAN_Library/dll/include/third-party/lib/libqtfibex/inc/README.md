@@ -1,0 +1,129 @@
+
+# XML structure
+
+- fx:ELEMENTS
+	- fx:CHANNELS
+		- fx:CHANNEL ID=
+			- fx:PDU-TRIGGERINGS
+				- fx:PDU-TRIGGERING ID=
+					- fx:PDU-REF ID-REF=
+			- fx:FRAME-TRIGGERINGS
+				- fx:FRAME-TRIGGERING ID=
+					- fx:TIMINGS
+					- fx:FRAME-REF ID-REF=
+
+	- fx:ECUS
+		- fx:ECU
+			- fx:CONTROLLERS
+				- fx:CONTROLLER[N]
+			- fx:CONNECTORS
+				- fx:CONNECTOR[N]  flexray:CONNECTOR-TYPE
+					- fx:CHANNEL-REF
+					- fx:CONTROLLER-REF
+					- fx:INPUTS
+						- fx:INPUT-PORT[N]
+							- fx:FRAME-TRIGGERING-REF[N] ID-REF= fx:FRAME-TRIGGERING
+							- fx:INCLUDED-PDUS
+								- fx:INCLUDED-PDU
+									- fx:PDU-TRIGGERING-REF ID-REF=
+									- fx:INCLUDED-SIGNALS
+										- fx:INCLUDED-SIGNAL
+											- fx:SIGNAL-INSTANCE-REF ID-REF=
+					- fx:OUTPUTS
+						- fx:OUTPUT-PORT[N]
+							- fx:FRAME-TRIGGERING-REF[N] ID-REF= fx:FRAME-TRIGGERING
+							
+	- fx:PDUS
+		- fx:PDU ID=
+			- fx:SIGNAL-INSTANCES
+				- fx:SIGNAL-INSTANCE ID=
+					- fx:SIGNAL-REF ID-REF=
+				
+	- fx:FRAMES
+		- fx:FRAME ID=
+			- fx:PDU-INSTANCES
+				- fx:PDU-INSTANCE ID=
+					- fx:PDU-REF ID-REF=
+					
+	- fx:SIGNALS
+		- fx:SIGNAL ID=
+			- fx:CODING-REF ID-REF=
+			- fx:SIGNAL-TYPE
+	
+- fx:PROCESSING-INFORMATION
+	- ho:UNIT-SPEC
+		- ho:UNITS
+			- ho:UNIT ID=
+			
+	- fx:CODINGS
+		- fx:CODING ID=
+			- ho:COMPU-METHODS
+				- ho:COMPU-METHOD
+					- ho:UNIT-REF ID-REF=
+	
+	
+# Entities Relationships
+
+- fx:CHANNEL
+	- @ecus
+
+- fx:ECU
+	- @rxFrames
+		- fx:CONNECTOR
+			- fx:INPUT-PORT
+				- fx:FRAME-TRIGGERING-REF[N]	-> fx:FRAME-TRIGGERING
+					- fx:FRAME-TRIGGERING
+						- fx:SLOT-ID/fx:BASE-CYCLE/fx:CYCLE-REPETITION
+						- fx:FRAME-REF	-> fx:FRAME
+	- @txFrames
+		- fx:CONNECTOR
+			- fx:OUTPUT-PORT
+				- fx:FRAME-TRIGGERING-REF[N]	-> fx:FRAME-TRIGGERING
+					- fx:FRAME-TRIGGERING
+						- fx:SLOT-ID/fx:BASE-CYCLE/fx:CYCLE-REPETITION
+						- fx:FRAME-REF	-> fx:FRAME
+						
+- fx:FRAME
+	- ho:SHORT-NAME/fx:BYTE-LENGTH/fx:FRAME-TYPE
+	- fx:PDU-INSTANCES
+		- fx:PDU-INSTANCE [N]
+			- fx:BIT-POSITION/fx:IS-HIGH-LOW-BYTE-ORDER
+			- fx:PDU-REF[N] -> fx:PDU
+			
+- fx:PDU
+	- ho:SHORT-NAME/fx:BYTE-LENGTH/fx:PDU-TYPE
+	- fx:SIGNAL-INSTANCES
+		- fx:SIGNAL-INSTANCE[N]
+			- fx:BIT-POSITION/fx:IS-HIGH-LOW-BYTE-ORDER
+			- fx:SIGNAL-REF(ID-REF=) -> fx:SIGNAL(ID)
+			
+- fx:SIGNAL(ID=)
+	- ho:SHORT-NAME/fx:SIGNAL-TYPE
+	- fx:CODING-REF -> fx:CODING
+		
+- fx:CODING
+	- ho:SHORT-NAME
+	- ho:CODED-TYPE
+		- ho:BIT-LENGTH
+	- ho:COMPU-METHODS
+		- ho:COMPU-METHOD
+				
+- ho:COMPU-METHOD
+	- ho:SHORT-NAME/ho:CATEGORY = TEXTTABLE
+	- ho:COMPU-INTERNAL-TO-PHYS
+		- ho:COMPU-SCALES
+			- ho:COMPU-SCALE
+				- ho:LOWER-LIMIT/ho:UPPER-LIMIT/ho:COMPU-CONST	
+	
+- ho:COMPU-METHOD
+	- ho:SHORT-NAME/ho:CATEGORY = LINEAR
+	- ho:PHYS-CONSTRS
+		- ho:SCALE-CONSTR
+			- ho:LOWER-LIMIT/ho:UPPER-LIMIT
+	- ho:COMPU-INTERNAL-TO-PHYS
+		- ho:COMPU-SCALES
+			- ho:COMPU-SCALE
+				- ho:COMPU-RATIONAL-COEFFS
+					- ho:COMPU-NUMERATOR
+					- ho:COMPU-DENOMINATOR
+					

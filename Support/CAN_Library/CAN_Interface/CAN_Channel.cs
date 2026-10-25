@@ -1,0 +1,7763 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using CAN_Library.CAN_Driver;
+using System.ComponentModel;
+using System.Collections.ObjectModel;
+using System.Diagnostics;
+using System.IO;
+using System.Threading;
+using System.Timers;
+using System.Xml.Linq;
+using System.Runtime.Serialization.Formatters.Binary;
+using System.Globalization;
+using System.Windows.Forms;
+using CAN_Library.CAN_Parameter;
+using CAN_Library.CAN_Driver;
+using System.Xml;
+using SapaWraper;
+using System.Runtime.InteropServices;
+
+namespace CAN_Library.CAN_Interface
+{
+    public class CAN_Channel : INotifyPropertyChanged
+    {
+        #region INotifyPropertyChanged
+        public event PropertyChangedEventHandler PropertyChanged;
+
+        protected void OnPropertyChanged(string name)
+        {
+            PropertyChangedEventHandler handler = PropertyChanged;
+            if (handler != null)
+            {
+                handler(this, new PropertyChangedEventArgs(name));
+            }
+        }
+        #endregion
+
+        #region internal variables
+        CAN_Driver.CAN_Driver _driver;
+        internal byte _ChannelID;
+        Thread CAN_CycleThread;
+        bool CAN_Thread_IsActive = false;
+        Thread PITS_CycleThread;
+        bool PITS_Thread_IsActive = false;
+        bool MessageCallBak_Regist = false;
+        System.Timers.Timer _swcWakeTimer;
+        bool _swcWakeTimer_hasSet = false;
+        char[] separator = new char[]
+        {
+                    ' ',
+                    ':',
+                    '\t',
+                    '(',
+                    ')',
+                    '[',
+                    ']',
+        };
+        List<CAN_Message> _CAN_Matrix = new List<CAN_Message>();
+        //diagnostic parameters
+        public List<Diag_DID> _Diag_Matrix = new List<Diag_DID>();
+        public List<Diag_Signal> _Diag_SignalList = new List<Diag_Signal>();
+        public uint diagReq_ID = 0;
+        public uint diagRes_ID = 0;
+        CancellationTokenSource CancellationTokenSource_TP = new CancellationTokenSource();
+
+        /// <summary>
+        /// <para>non-standard CAN message matrix == pits message matrix</para>
+        /// <para>this list is to send and store cyclic PITS</para>
+        /// <para>PITS is only for aptiv internal</para>
+        /// </summary>
+        ObservableCollection<CAN_Message> PITS_Matrix = new ObservableCollection<CAN_Message>();
+        List<uint> _DBC_CANidList = new List<uint>();
+        List<uint> _DBC_RxCANidList = new List<uint>();
+        List<CAN_Message> _CAN_TxCyclicList = new List<CAN_Message>();
+
+        int CANcyclePause = 0;//0-no action,1-pause,2-start
+        int PITScyclePause = 0;//0-no action,1-pause,2-start
+        internal Device_Type _device_type;
+        internal string _Name;
+        internal string _DeviceName;
+        internal string _FullName;
+        internal bool _IsConnected;
+        internal bool _isFD = false;
+        internal CAN_Driver.CAN_Parameter _CAN_Parameter;
+        string _DBCFilePath;
+        public static string _benchName = "bench";
+        uint mask = 0x00FFFF00;
+        /// <summary>
+        /// <para>set this flag to true to block cyclic sending thread</para>
+        /// <para>set this flag to false to release cyclic sending thread</para>
+        /// </summary>
+        bool isInImportdbcProcess = false;
+        bool isInImportflbexProcess = false;
+
+        #endregion
+
+        #region open properties to external application
+        /// <summary>
+        /// <para>store messages in dbc</para>
+        /// </summary>
+        public List<CAN_Message> CAN_Matrix
+        {
+            get { return _CAN_Matrix; }
+            set { _CAN_Matrix = value; OnPropertyChanged("CAN_Matrix"); }
+        }
+
+        List<CAN_Message> _CAN_Matrix_EXTRA = new List<CAN_Message>();
+        public List<CAN_Message> CAN_Matrix_EXTRA
+        {
+            get { return _CAN_Matrix_EXTRA; }
+            set { _CAN_Matrix_EXTRA = value; OnPropertyChanged("CAN_Matrix_EXTRA"); }
+        }
+
+        List<FlexRay_Message> _FlexRay_Matrix = new List<FlexRay_Message>();
+        public List<FlexRay_Message> FlexRay_Matrix
+        {
+            get { return _FlexRay_Matrix; }
+            set { _FlexRay_Matrix = value; OnPropertyChanged("FlexRay_Matrix"); }
+        }
+
+        /// <summary>
+        /// <para>store signals in dbc</para>
+        /// </summary>
+        public List<CAN_Signal> _SignalList = new List<CAN_Signal>();
+        public List<CAN_Signal> _FlexRay_SignalList = new List<CAN_Signal>();
+
+        //message tx/rx event
+        public delegate void PMessageCallback(CAN_Message Msg);
+        public event PMessageCallback ChannelMessageNotify;
+
+        //readonly device type/band
+        public Device_Type DeviceType
+        {
+            get
+            {
+                return _device_type;
+            }
+        }
+
+        //readonly channel name
+        public string Name
+        {
+            get
+            {
+                return _Name;
+            }
+        }
+
+        //readonly device name(contains band/tag/serialNumber)
+        public string DeviceName
+        {
+            get
+            {
+                return _DeviceName;
+            }
+        }
+
+        //readonly channel full name(contains device name and channel name)
+        public string FullName
+        {
+            get
+            {
+                return _FullName;
+            }
+        }
+
+        //property with display auto update
+        public bool IsConnected
+        {
+            get { return _IsConnected; }
+            set { _IsConnected = value; OnPropertyChanged("IsConnected"); }
+        }
+
+        public bool isFD
+        {
+            get { return _isFD; }
+            set { _isFD = value; OnPropertyChanged("isFD"); }
+        }
+
+        //property with display auto update
+        public CAN_Driver.CAN_Parameter CAN_Parameter
+        {
+            get { return _CAN_Parameter; }
+            set { _CAN_Parameter = value; OnPropertyChanged("CAN_Parameter"); }
+        }
+
+        //property with display auto update
+        public string DBCFilePath
+        {
+            get { return _DBCFilePath; }
+            set { _DBCFilePath = value; OnPropertyChanged("DBCFilePath"); }
+        }
+
+        string _DiagFilePath;
+        public string DiagFilePath
+        {
+            get { return _DiagFilePath; }
+            set { _DiagFilePath = value; OnPropertyChanged("DiagFilePath"); }
+        }
+
+        #endregion
+
+        #region lin variables
+        public static char[] ldf_separator = new char[]
+        {
+                                    ',',
+                                    ':',
+                                    '"',
+                                    ';',
+                                    '=',
+                                    '\t',
+                                    '{',
+                                    '}',
+                                    ' ',
+        };
+
+        bool isInImportldfProcess = false;
+        long LIN_FirstReceivedTimeMs = 0;
+
+        LINDriver _LINdriver;
+        FlexRay_Driver _FlexRayDriver;
+
+        string _LDFFilePath = "";
+        public string LDFFilePath
+        {
+            get { return _LDFFilePath; }
+            set { _LDFFilePath = value; OnPropertyChanged("LDFFilePath"); }
+        }
+
+        internal LIN_Parameter _LIN_Parameter = new LIN_Parameter();
+        public LIN_Parameter LIN_Parameter
+        {
+            get { return _LIN_Parameter; }
+            set { _LIN_Parameter = value; OnPropertyChanged("LIN_Parameter"); }
+        }
+
+        /// <summary>
+        /// <para>store messages in ldf</para>
+        /// </summary>
+        List<LIN_Message> _LIN_Matrix = new List<LIN_Message>();
+        public List<LIN_Message> Lin_Matrix
+        {
+            get { return _LIN_Matrix; }
+            set { _LIN_Matrix = value; OnPropertyChanged("Lin_Matrix"); }
+        }
+        public List<CAN_Signal> _LinSignalList = new List<CAN_Signal>();
+
+        List<LIN_Node> _Slave_Nodes = new List<LIN_Node>();
+        public List<LIN_Node> Slave_Nodes
+        {
+            get { return _Slave_Nodes; }
+            set { _Slave_Nodes = value; OnPropertyChanged("Slave_Nodes"); }
+        }
+
+        public LDF_Settings ldf_settings = new LDF_Settings();
+
+        //LIN rx event
+        public delegate void LINmsgCallback(LIN_Message Msg);
+        public event LINmsgCallback ChannelLINmsgNotify;
+        #endregion
+
+        #region open functions as interface to external application
+
+        #region channel parameter operations
+        /// <summary>
+        /// <para>active this channel and set it by CAN parameters you want</para>
+        /// <para>parameters like baudrate, sample point, CAN/FD mode are defined in property "CAN_Parameter" in this class</para>
+        /// <para>before use this function, you must first assign value for "CAN_Parameter". If not, the channel will be set at 500K baud rate 2.0 CAN</para>
+        /// <para>function returns True if active channel sucessfullly, otherwise returns False</para>
+        /// <para>alternative functions:</para>
+        /// <see cref="Connect(bool)"/>
+        /// <para></para>
+        /// <see cref="Connect(CAN_Driver.CAN_Parameter)"/>
+        /// </summary>
+        public bool Connect()
+        {
+            try
+            {
+                Log.Logger_Run(string.Format("[channel connect] try to connect CAN_Channel."));
+                if (IsConnected == true)
+                {
+                    Log.Logger_Run(string.Format("[channel connect] Warn! channel not need connect, it connect before."));
+                    return true;
+                }
+
+                ///forbid assign fd mode to channel which doesn't support fd
+                if (!CAN_Parameter.IsFDSupport)
+                {
+                    if (Convert.ToInt16(CAN_Parameter.BusProtocolMode) > 0)
+                    {
+                        Log.Logger_Run(string.Format("fail to forbid assign fd mode to channel which doesn't support fd"));
+                        return false;
+                    }
+                }
+
+                _driver = CANDriverFactory.FilterDriver(_device_type, _DeviceName, _ChannelID, _CAN_Parameter);
+
+                if (_driver.Initialize(CAN_Parameter))
+                {
+                    CAN_Thread_IsActive = true;
+                    PITS_Thread_IsActive = true;
+
+                    CAN_CycleThread = new Thread(new ThreadStart(CyclicMessagesThread));
+                    CAN_CycleThread.IsBackground = true;
+                    CAN_CycleThread.Name = FullName;
+                    CAN_CycleThread.Start();
+
+                    PITS_CycleThread = new Thread(new ThreadStart(PITSCyclicMessagesThread));
+                    PITS_CycleThread.IsBackground = true;
+                    PITS_CycleThread.Name = FullName + "_pits";
+                    PITS_CycleThread.Start();
+
+                    if (!MessageCallBak_Regist)
+                    {
+                        _driver.MessageEvent += OnMessageReceivedEventHandler;
+                        MessageCallBak_Regist = true;
+                    }
+                    IsConnected = true;
+                    isFD = Convert.ToInt16(CAN_Parameter.BusProtocolMode) > 0;
+                    return true;
+                }
+                else
+                    return false;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Connect()\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// <para>active this channel and set it by CAN parameters you want</para>
+        /// <para>you can specify CAN/FD mode as input, and other parameters like baudrate, sample point are defined in property "CAN_Parameter" in this class</para>
+        /// <para>before use this function, you should first assign value for "CAN_Parameter". If not, the channel will be set as default status.
+        /// 500K 2.0 CAN if "IsFD" is false or 500K and 2M FD CAN if "IsFD" is true</para>
+        /// <para>alternative functions:</para>
+        /// <see cref="Connect()"/>
+        /// <para></para>
+        /// <see cref="Connect(CAN_Driver.CAN_Parameter)"/>
+        /// </summary>
+        /// <param name="IsFD">false then set channel to 2.0 CAN mode, true then set to ISO FD mode</param>
+        /// <returns>True if active channel sucessfullly, otherwise returns False</returns>
+        public bool Connect(bool IsFD)
+        {
+            try
+            {
+                if (IsConnected == true)
+                { return true; }
+
+                ///forbid assign fd mode to channel which doesn't support fd
+                if (!CAN_Parameter.IsFDSupport)
+                {
+                    if (IsFD)
+                        return false;
+                }
+
+                _CAN_Parameter.BusProtocolMode = IsFD == true ? CANBus_ProtocolMode.ISO_CAN_FD : CANBus_ProtocolMode.CAN;
+                _driver = CANDriverFactory.FilterDriver(_device_type, _DeviceName, _ChannelID, _CAN_Parameter);
+
+                if (_driver.Initialize(CAN_Parameter))
+                {
+                    CAN_Thread_IsActive = true;
+                    PITS_Thread_IsActive = true;
+
+                    CAN_CycleThread = new Thread(new ThreadStart(CyclicMessagesThread));
+                    CAN_CycleThread.IsBackground = true;
+                    CAN_CycleThread.Name = FullName;
+                    CAN_CycleThread.Start();
+
+                    PITS_CycleThread = new Thread(new ThreadStart(PITSCyclicMessagesThread));
+                    PITS_CycleThread.IsBackground = true;
+                    PITS_CycleThread.Name = FullName + "_pits";
+                    PITS_CycleThread.Start();
+
+                    if (!MessageCallBak_Regist)
+                    {
+                        _driver.MessageEvent += OnMessageReceivedEventHandler;
+                        MessageCallBak_Regist = true;
+                    }
+                    IsConnected = true;
+                    isFD = IsFD;
+                    return true;
+                }
+                else
+                    return false;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Connect(bool IsFD)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// <para>active this channel and set it by CAN parameters you input</para>
+        /// <para>you should set the input CAN param as you want, like baudrate, sample point, CAN/FD mode</para>
+        /// <para>function returns True if active channel sucessfullly, otherwise returns False</para>
+        /// <para>alternative functions:</para>
+        /// <see cref="Connect()"/>
+        /// <para></para>
+        /// <see cref="Connect(bool)"/>
+        /// </summary>
+        /// <param name="can_parameter">it contains baudrate, sample point, CAN/FD mode</param>
+        /// <returns>True if active channel sucessfullly, otherwise returns False</returns>
+        public bool Connect(CAN_Driver.CAN_Parameter can_parameter)
+        {
+            try
+            {
+                if (IsConnected == true)
+                { return true; }
+
+                ///forbid assign fd mode to channel which doesn't support fd
+                if (!CAN_Parameter.IsFDSupport)
+                {
+                    if (Convert.ToInt16(can_parameter.BusProtocolMode) > 0)
+                        return false;
+                }
+
+                _driver = CANDriverFactory.FilterDriver(_device_type, _DeviceName, _ChannelID, _CAN_Parameter);
+
+                if (_driver.Initialize(can_parameter))
+                {
+                    CAN_Thread_IsActive = true;
+                    PITS_Thread_IsActive = true;
+
+                    CAN_CycleThread = new Thread(new ThreadStart(CyclicMessagesThread));
+                    CAN_CycleThread.IsBackground = true;
+                    CAN_CycleThread.Name = FullName;
+                    CAN_CycleThread.Start();
+
+                    PITS_CycleThread = new Thread(new ThreadStart(PITSCyclicMessagesThread));
+                    PITS_CycleThread.IsBackground = true;
+                    PITS_CycleThread.Name = FullName + "_pits";
+                    PITS_CycleThread.Start();
+
+                    if (!MessageCallBak_Regist)
+                    {
+                        _driver.MessageEvent += OnMessageReceivedEventHandler;
+                        MessageCallBak_Regist = true;
+                    }
+                    IsConnected = true;
+                    isFD = Convert.ToInt16(can_parameter.BusProtocolMode) > 0;
+                    return true;
+                }
+                else
+                    return false;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Connect(CAN_Driver.CAN_Parameter can_parameter)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// <para>deactive channel and all message in this channel will be stopped</para>
+        /// </summary>
+        /// <returns>it returns true if disconnect sucessfully</returns>
+        public bool DisConnect()
+        {
+            try
+            {
+                CAN_Thread_IsActive = false;
+                PITS_Thread_IsActive = false;
+
+                Thread.Sleep(50);
+                if (MessageCallBak_Regist)
+                {
+                    _driver.MessageEvent -= OnMessageReceivedEventHandler;
+                    MessageCallBak_Regist = false;
+                }
+
+                if (_driver != null)
+                {
+                    _driver.Dispose();
+                }
+
+                IsConnected = false;
+                ClearCANList();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] DisConnect()\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// <para>this function only sets baud rate of normal CAN</para>
+        /// <para>it don't work for FD CAN</para>
+        /// </summary>
+        /// <param name="baudrate">range from 33k to 5M</param>
+        /// <returns>it returns true if set rate successfullly</returns>
+        public bool ReSetBaudrate(CanBaudRate baudrate)
+        {
+            if (_driver != null)
+            {
+                if (CAN_Parameter.BusProtocolMode == CANBus_ProtocolMode.ISO_CAN_FD || CAN_Parameter.BusProtocolMode == CANBus_ProtocolMode.NON_ISO_CAN_FD)
+                {
+                    return false;
+                }
+                else
+                {
+                    CAN_Driver.CAN_Parameter paramToSet = new CAN_Driver.CAN_Parameter(_CAN_Parameter.BusPhysicType, _CAN_Parameter.IsFDSupport);
+                    paramToSet.BaudRate = baudrate;
+                    paramToSet.BusProtocolMode = CANBus_ProtocolMode.CAN;
+                    return _driver.SetBaudrate(paramToSet);
+                }
+            }
+            else
+            {
+                if (CAN_Parameter.BusProtocolMode == CANBus_ProtocolMode.CAN)
+                {
+                    return IsConformed_InputBaudrate(baudrate);
+                }
+                else
+                {
+                    return false;
+                }
+            }
+        }
+
+        /// <summary>
+        /// <para>this function only sets baud rate of FD CAN</para>
+        /// <para>it don't work for normal CAN</para>
+        /// </summary>
+        /// <param name="arbitration_rate">range from 33k to 5M</param>
+        /// <param name="data_rate">range from 33k to 5M</param>
+        /// <returns>it returns true if set rate successfully</returns>
+        public bool ReSetFDBaudrate(CanBaudRate arbitration_rate, CanBaudRate data_rate)
+        {
+            if (_driver != null)
+            {
+                if (CAN_Parameter.BusProtocolMode == CANBus_ProtocolMode.CAN)
+                {
+                    return false;
+                }
+                else
+                {
+                    CAN_Driver.CAN_Parameter paramToSet = new CAN_Driver.CAN_Parameter(_CAN_Parameter.BusPhysicType, _CAN_Parameter.IsFDSupport);
+                    paramToSet.BusProtocolMode = CAN_Parameter.BusProtocolMode;
+                    paramToSet.Arbitration_rate = arbitration_rate;
+                    paramToSet.Data_rate = data_rate;
+                    return _driver.SetBaudrate(paramToSet);
+                }
+            }
+            else
+            {
+                if (!CAN_Parameter.IsFDSupport)
+                {
+                    return false;
+                }
+                if (CAN_Parameter.BusProtocolMode == CANBus_ProtocolMode.CAN)
+                {
+                    return false;
+                }
+                else
+                {
+                    return IsConformed_InputFDBaudrate(arbitration_rate, data_rate);
+                }
+            }
+        }
+
+        /// <summary>
+        /// <para>import dbc file to this channel. Once import sucessfully, it will send all cyclic messages in dbc file</para>
+        /// <para>alternative functions:</para>
+        /// <see cref="Import_DBC_WithoutSending(string)"/>
+        /// </summary>
+        /// <param name="DBC_Path">dbc file absolute path</param>
+        /// <returns></returns>
+        public bool Import_DBC(string DBC_Path, bool is1939 = false)
+        {
+            DBCFilePath = DBC_Path;
+            string extension = Path.GetExtension(DBCFilePath).ToLower();
+            if (extension == ".dbc")
+            {
+                return ImportDBC_ThenSending(is1939);
+            }
+            else if (extension == ".arxml")
+            {
+                return Import_ARXML_ThenSending();
+            }
+            else
+                return false;
+        }
+
+        /// <summary>
+        /// <para>import dbc to this channel, then it won't send cyclic messages</para>
+        /// <para>alternative functions:</para>
+        /// <see cref="Import_DBC(string)"/>
+        /// </summary>
+        /// <param name="DBC_Path"></param>
+        /// <returns></returns>
+        public bool Import_DBC_WithoutSending(string DBC_Path, bool is1939 = false)
+        {
+            DBCFilePath = DBC_Path;
+            string extension = Path.GetExtension(DBCFilePath).ToLower();
+            if (extension == ".dbc")
+            {
+                return ImportDBC_WithoutSending(is1939);
+            }
+            else if (extension == ".arxml")
+            {
+                return Import_ARXML_WithoutSending();
+            }
+            else
+                return false;
+        }
+
+        /// <summary>
+        /// <para>delete dbc in channel and stop sending cyclic messages</para>
+        /// </summary>
+        /// <returns></returns>
+        public bool Delete_DBC()
+        {
+            try
+            {
+                isInImportdbcProcess = true;
+                Thread.Sleep(50);
+                ClearCANList();
+                DBCFilePath = "";
+                isInImportdbcProcess = false;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Delete_DBC()\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        public void setBenchName(string benchname)//设置RX的节点名，默认值为bench
+        {
+            _benchName = benchname;
+        }
+
+        public void set_SingleWireHighVoltage(uint id, bool isSingleWireHighVoltage)
+        {
+            if (CAN_Matrix.Any(p => p.ID == id))
+            {
+                CAN_Matrix.First(p => p.ID == id).isSingleWireHighVoltage = isSingleWireHighVoltage;
+            }
+        }
+
+        /// <summary>
+        /// to get CAN message info list, same as open property "CAN_Matrix"
+        /// </summary>
+        /// <returns></returns>
+        public List<CAN_Message> Get_CAN_Matrix()
+        {
+            return CAN_Matrix;
+        }
+        #endregion
+
+        #region signal operations
+        /// <summary>
+        /// <para>set signa value by signal name</para>
+        /// <para>note that value is physical value, not raw value</para>
+        /// </summary>
+        /// <param name="signalName">signal short name in dbc</param>
+        /// <param name="signal_PhysicValue">physical value</param>
+        /// <param name="isSendNow">it will send this signal at once if this parameter is true</param>
+        /// <returns></returns>
+        public bool Set_Signal(string signalName, double signal_PhysicValue, bool isSendNow = false)
+        {
+            try
+            {
+                uint canid = 0;
+                if (_SignalList.Any(p => p.Name == signalName))
+                {
+                    canid = _SignalList.First(p => p.Name == signalName).CAN_ID_Ref;
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return false;
+                }
+
+                CAN_Message msg = CAN_Matrix.First(p => p.ID == canid);
+                if (msg.TxRx == TxRxType.Tx)
+                {
+                    msg.Set_Signal_PhysicalValue(_SignalList.First(p => p.Name == signalName), signal_PhysicValue);
+                    if (isSendNow == true)
+                    {
+                        Pmessage temp_msg = new Pmessage(msg.ID, Convert.ToByte(msg.DLC), msg.Data, TxRxType.Tx, (Convert.ToInt16(msg.Type) > 1), 0);
+                        _driver.SendMessage(temp_msg);
+                    }
+                    return true;
+                }
+                else
+                {
+                    //signal is rx type, forbid setting value
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Set_Signal(string signalName, double signal_PhysicValue, bool isSendNow = false)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// <para>set signal vaule by signal name and CANid</para>
+        /// <para>note that value is physical value, not raw value</para>
+        /// <para>if here's same name signals, this solves the conflict with CANID</para>
+        /// </summary>
+        /// <param name="signalName">signal short name in dbc</param>
+        /// <param name="CANid">CAN ID</param>
+        /// <param name="signal_PhysicValue">physical value</param>
+        /// <param name="isSendNow">it will send this signal at once if this parameter is true</param>
+        /// <returns></returns>
+        public bool Set_Signal(string signalName, uint CANid, double signal_PhysicValue, bool isSendNow = false)
+        {
+            try
+            {
+                uint canid = 0;
+                if (_SignalList.Any(p => p.Name == signalName && p.CAN_ID_Ref == CANid))
+                {
+                    CAN_Signal signal = _SignalList.First(p => p.Name == signalName && p.CAN_ID_Ref == CANid);
+                    canid = signal.CAN_ID_Ref;
+                    CAN_Message msg = CAN_Matrix.First(p => p.ID == canid);
+                    if (msg.TxRx == TxRxType.Tx)
+                    {
+                        msg.Set_Signal_PhysicalValue(signal, signal_PhysicValue);
+                        if (isSendNow == true)
+                        {
+                            Pmessage temp_msg = new Pmessage(msg.ID, Convert.ToByte(msg.DLC), msg.Data, TxRxType.Tx, (Convert.ToInt16(msg.Type) > 1), 0);
+                            _driver.SendMessage(temp_msg);
+                        }
+                        return true;
+                    }
+                    else
+                    {
+                        //signal is rx type, forbid setting value
+                        return false;
+                    }
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Set_Signal(string signalName, uint CANid, double signal_PhysicValue, bool isSendNow = false)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// <para>set signal vaule and send it out</para>
+        /// <para>note that value is physical value, not raw value</para>
+        /// </summary>
+        /// <param name="signalName">signal short name in dbc</param>
+        /// <param name="signal_PhysicValue">physical value</param>
+        /// <returns></returns>
+        public bool Set_Signal_PhysicValue(string signalName, double signal_PhysicValue)
+        {
+            try
+            {
+                uint canid = 0;
+                if (_SignalList.Any(p => p.Name == signalName))
+                {
+                    canid = _SignalList.First(p => p.Name == signalName).CAN_ID_Ref;
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return false;
+                }
+
+                CAN_Message msg = CAN_Matrix.First(p => p.ID == canid);
+                if (msg.TxRx == TxRxType.Tx)
+                {
+                    msg.Set_Signal_PhysicalValue(_SignalList.First(p => p.Name == signalName), signal_PhysicValue);
+                    Pmessage temp_msg = new Pmessage(msg.ID, Convert.ToByte(msg.DLC), msg.Data, TxRxType.Tx, (Convert.ToInt16(msg.Type) > 1), 0);
+                    _driver.SendMessage(temp_msg);
+                    return true;
+                }
+                else
+                {
+                    //signal is rx type, forbid setting value
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Set_Signal_PhysicValue(string signalName, double signal_PhysicValue)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// <para>set signal vaule and send it out, filter is CAN ID</para>
+        /// <para>note that value is physical value, not raw value</para>
+        /// </summary>
+        /// <param name="signalName">signal short name in dbc</param>
+        /// <param name="CANid">CAN ID</param>
+        /// <param name="signal_PhysicValue">physical value</param>
+        /// <returns></returns>
+        public bool Set_Signal_PhysicValue(string signalName, uint CANid, double signal_PhysicValue)
+        {
+            try
+            {
+                uint canid = 0;
+                if (_SignalList.Any(p => p.Name == signalName && p.CAN_ID_Ref == CANid))
+                {
+                    CAN_Signal signal = _SignalList.First(p => p.Name == signalName && p.CAN_ID_Ref == CANid);
+                    canid = signal.CAN_ID_Ref;
+                    CAN_Message msg = CAN_Matrix.First(p => p.ID == canid);
+                    if (msg.TxRx == TxRxType.Tx)
+                    {
+                        msg.Set_Signal_PhysicalValue(signal, signal_PhysicValue);
+                        Pmessage temp_msg = new Pmessage(msg.ID, Convert.ToByte(msg.DLC), msg.Data, TxRxType.Tx, (Convert.ToInt16(msg.Type) > 1), 0);
+                        _driver.SendMessage(temp_msg);
+                        return true;
+                    }
+                    else
+                    {
+                        //signal is rx type, forbid setting value
+                        return false;
+                    }
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Set_Signal_PhysicValue(string signalName, uint CANid, double signal_PhysicValue)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// <para>set signal vaule and send it out</para>
+        /// </summary>
+        /// <param name="signal">signal structure</param>
+        /// <returns></returns>
+        public bool Set_Signal_Value(CAN_Signal signal)
+        {
+            try
+            {
+                uint canid = 0;
+                string signalName = signal.Name;
+                double signal_PhysicValue = signal.Value;
+                if (_SignalList.Any(p => p.Name == signalName))
+                {
+                    canid = _SignalList.First(p => p.Name == signalName).CAN_ID_Ref;
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return false;
+                }
+
+                CAN_Message msg = CAN_Matrix.First(p => p.ID == canid);
+                if (msg.TxRx == TxRxType.Tx)
+                {
+                    msg.Set_Signal_PhysicalValue(_SignalList.First(p => p.Name == signalName), signal_PhysicValue);
+                    Pmessage temp_msg = new Pmessage(msg.ID, Convert.ToByte(msg.DLC), msg.Data, TxRxType.Tx, (Convert.ToInt16(msg.Type) > 1), 0);
+                    _driver.SendMessage(temp_msg);
+                    return true;
+                }
+                else
+                {
+                    //signal is rx type, forbid setting value
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Set_Signal_Value(CAN_Signal signal)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// <para>set several signals vaule</para>
+        /// </summary>
+        /// <param name="signals"></param>
+        /// <returns></returns>
+        public bool Set_MultiSignal_Value(params CAN_Signal[] signals)
+        {
+            try
+            {
+                uint canid = 0;
+                foreach (var item in signals)
+                {
+                    if (_SignalList.Any(p => p.Name == item.Name && p.CAN_ID_Ref == item.CAN_ID_Ref))
+                    {
+                        CAN_Signal thisSignal = _SignalList.First(p => p.Name == item.Name && p.CAN_ID_Ref == item.CAN_ID_Ref);
+                        canid = thisSignal.CAN_ID_Ref;
+
+                        CAN_Message msg = CAN_Matrix.First(p => p.ID == canid);
+                        if (msg.TxRx == TxRxType.Tx)
+                        {
+                            msg.Set_Signal_PhysicalValue(thisSignal, item.Value);
+                            if (msg.Method == Tx_Method.Spontan)
+                            {
+                                Pmessage temp_msg = new Pmessage(msg.ID, Convert.ToByte(msg.DLC), msg.Data, TxRxType.Tx, (Convert.ToInt16(msg.Type) > 1), 0);
+                                _driver.SendMessage(temp_msg);
+                            }
+                        }
+                        else
+                        {
+                            //signal is rx type, forbid setting value
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        //no such signal in dbc
+                        continue;
+                    }
+                    Thread.Sleep(1);
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Set_MultiSignal_Value(params CAN_Signal[] signals)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// <para>set signal vaule and send it out</para>
+        /// <para>note that value is raw value, not physical value</para>
+        /// </summary>
+        /// <param name="signalName">signal short name in dbc</param>
+        /// <param name="signal_RawValue">raw value</param>
+        /// <returns></returns>
+        public bool Set_Signal_RawValue(string signalName, ulong signal_RawValue)
+        {
+            try
+            {
+                uint canid = 0;
+                if (_SignalList.Any(p => p.Name == signalName))
+                {
+                    canid = _SignalList.First(p => p.Name == signalName).CAN_ID_Ref;
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return false;
+                }
+
+                CAN_Message msg = CAN_Matrix.First(p => p.ID == canid);
+                if (msg.TxRx == TxRxType.Tx)
+                {
+                    msg.Set_Signal_RawValue(_SignalList.First(p => p.Name == signalName), signal_RawValue);
+                    Pmessage temp_msg = new Pmessage(msg.ID, Convert.ToByte(msg.DLC), msg.Data, TxRxType.Tx, (Convert.ToInt16(msg.Type) > 1), 0);
+                    _driver.SendMessage(temp_msg);
+                    return true;
+                }
+                else
+                {
+                    //signal is rx type, forbid setting value
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Set_Signal_RawValue(string signalName, ulong signal_RawValue)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// <para>set signal vaule and send it out, filter is CAN ID</para>
+        /// <para>note that value is raw value, not physical value</para>
+        /// </summary>
+        /// <param name="signalName">signal short name in dbc</param>
+        /// <param name="CANid">CAN ID</param>
+        /// <param name="signal_RawValue">raw value</param>
+        /// <returns></returns>
+        public bool Set_Signal_RawValue(string signalName, uint CANid, ulong signal_RawValue)
+        {
+            try
+            {
+                uint canid = 0;
+                if (_SignalList.Any(p => p.Name == signalName && p.CAN_ID_Ref == CANid))
+                {
+                    CAN_Signal signal = _SignalList.First(p => p.Name == signalName && p.CAN_ID_Ref == CANid);
+                    canid = signal.CAN_ID_Ref;
+                    CAN_Message msg = CAN_Matrix.First(p => p.ID == canid);
+                    if (msg.TxRx == TxRxType.Tx)
+                    {
+                        msg.Set_Signal_RawValue(signal, signal_RawValue);
+                        Pmessage temp_msg = new Pmessage(msg.ID, Convert.ToByte(msg.DLC), msg.Data, TxRxType.Tx, (Convert.ToInt16(msg.Type) > 1), 0);
+                        _driver.SendMessage(temp_msg);
+                        return true;
+                    }
+                    else
+                    {
+                        //signal is rx type, forbid setting value
+                        return false;
+                    }
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Set_Signal_RawValue(string signalName, uint CANid, ulong signal_RawValue)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// <para>get signal vaule by signal name</para>
+        /// <para>note that value is physical value, not raw value</para>
+        /// </summary>
+        /// <param name="signalName">signal short name in dbc</param>
+        /// <returns></returns>
+        public double Get_signal(string signalName)
+        {
+            try
+            {
+                if (_SignalList.Any(p => p.Name == signalName))
+                {
+                    return _SignalList.First(p => p.Name == signalName).Value;
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return -99.999;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Get_signal(string signalName)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return -99.999;
+            }
+        }
+
+        public double Get_signal(uint CANid, string signalName)
+        {
+            try
+            {
+                if (_SignalList.Any(p => p.Name == signalName && p.CAN_ID_Ref == CANid))
+                {
+                    return _SignalList.First(p => p.Name == signalName && p.CAN_ID_Ref == CANid).Value;
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return -99.999;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Get_signal(uint CANid, string signalName)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return -99.999;
+            }
+        }
+
+        /// <summary>
+        /// <para>get signal vaule by signal name</para>
+        /// <para>note that value is physical value, not raw value</para>
+        /// <para>input parameter "signal" updates info if this function works</para>
+        /// </summary>
+        /// <param name="signal">signal structure</param>
+        /// <returns></returns>
+        public void Get_signal(ref CAN_Signal signal)
+        {
+            try
+            {
+                string signalName = signal.Name;
+                if (_SignalList.Any(p => p.Name == signalName))
+                {
+                    CAN_Signal Target_Signal = _SignalList.First(p => p.Name == signalName);
+                    signal.StartBit = Target_Signal.StartBit;
+                    signal.Length = Target_Signal.Length;
+                    signal.Factor = Target_Signal.Factor;
+                    signal.Offset = Target_Signal.Offset;
+                    signal.Init_Value = Target_Signal.Init_Value;
+                    signal.Minimum = Target_Signal.Minimum;
+                    signal.Maximum = Target_Signal.Maximum;
+                    signal.ByteOrder = Target_Signal.ByteOrder;
+                    signal.Unit = Target_Signal.Unit;
+                    signal.Value = Target_Signal.Value;
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Get_signal(ref CAN_Signal signal)\n{0}\n{1}", ex.Message, ex.StackTrace));
+            }
+        }
+
+        /// <summary>
+        /// <para>get signal object which has same name in CAN_Library</para>
+        /// </summary>
+        /// <param name="signalName">signal short name in dbc</param>
+        /// <returns></returns>
+        public CAN_Signal GetCANSignalFromCANMatrix(string signalName)
+        {
+            try
+            {
+                if (_SignalList.Any(p => p.Name == signalName))
+                {
+                    return _SignalList.First(p => p.Name == signalName);
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] GetCANSignalFromCANMatrix(string signalName)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return null;
+            }
+        }
+
+        public CAN_Signal GetCANSignalFromCANMatrix(string signalName, uint CAN_ID)
+        {
+            try
+            {
+                if (_SignalList.Any(p => p.Name == signalName && p.CAN_ID_Ref == CAN_ID))
+                {
+                    return _SignalList.First(p => p.Name == signalName && p.CAN_ID_Ref == CAN_ID);
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] GetCANSignalFromCANMatrix(string signalName, uint CAN_ID)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return null;
+            }
+        }
+
+        public void resumeByTx_Method(CAN_Message msg)
+        { //whether its a cyclic,event or cyclic and spontan
+            Pmessage temp_msg = new Pmessage(msg.ID, Convert.ToByte(msg.DLC), msg.Data, TxRxType.Tx, (Convert.ToInt16(msg.Type) > 1), 0);
+            switch (msg.Method)
+            {
+                case Tx_Method.Cyclic:
+                    if (msg.State == Message_State.Paused)
+                    {
+                        msg.State = Message_State.Active;
+                    }
+                    break;
+                case Tx_Method.CyclicAndSpontan:
+                    if (msg.State == Message_State.Paused)
+                    {
+                        msg.State = Message_State.Active;
+                    }                    
+                    _driver.SendMessage(temp_msg);
+                    break;
+                case Tx_Method.Spontan://event                  
+                    _driver.SendMessage(temp_msg);
+                    break;
+            }
+        }
+        /// <summary>
+        /// <para>send signal by signal name</para>
+        /// <para>if the message which contains this signal is cyclic type, then active the message to run</para>
+        /// </summary>
+        /// <param name="signalName">signal short name in dbc</param>
+        /// <param name="signal_PhysicValue">physical value</param>
+        public bool Send_Signal(string signalName, double signal_PhysicValue)
+        {
+            try
+            {
+                uint canid = 0;
+                if (_SignalList.Any(p => p.Name == signalName))
+                {
+                    canid = _SignalList.First(p => p.Name == signalName).CAN_ID_Ref;
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return false;
+                }
+
+                CAN_Message msg = CAN_Matrix.First(p => p.ID == canid);
+                if (msg.TxRx == TxRxType.Tx)
+                {
+                    msg.Set_Signal_PhysicalValue(_SignalList.First(p => p.Name == signalName), signal_PhysicValue);
+                    resumeByTx_Method(msg);
+                }
+                else
+                {
+                    //signal is rx type, forbid setting value
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Send_Signal(string signalName, double signal_PhysicValue)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// <para>signal by signal name and CANid</para>
+        /// <para>if the message which contains this signal is cyclic type, then active the message to run</para>
+        /// </summary>
+        /// <param name="CANid">CAN ID</param>
+        /// <param name="signalName">signal short name in dbc</param>
+        /// <param name="signal_PhysicValue">physical value</param>
+        public bool Send_Signal(uint CANid, string signalName, double signal_PhysicValue)
+        {
+            try
+            {
+                uint canid = 0;
+                if (_SignalList.Any(p => p.Name == signalName && p.CAN_ID_Ref == CANid))
+                {
+                    CAN_Signal signal = _SignalList.First(p => p.Name == signalName && p.CAN_ID_Ref == CANid);
+                    canid = signal.CAN_ID_Ref;
+                    CAN_Message msg = CAN_Matrix.First(p => p.ID == canid);
+                    if (msg.TxRx == TxRxType.Tx)
+                    {
+                        msg.Set_Signal_PhysicalValue(signal, signal_PhysicValue);
+                        resumeByTx_Method(msg);
+                    }
+                    else
+                    {
+                        //signal is rx type, forbid setting value
+                    }
+                    return true;
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Set_Signal_PhysicValue(string signalName, uint CANid, double signal_PhysicValue)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        public bool Send_Signal_RawValue(string signalName, ulong RawValue)
+        {
+            try
+            {
+                uint canid = 0;
+                if (_SignalList.Any(p => p.Name == signalName))
+                {
+                    canid = _SignalList.First(p => p.Name == signalName).CAN_ID_Ref;
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return false;
+                }
+
+                CAN_Message msg = CAN_Matrix.First(p => p.ID == canid);
+                if (msg.TxRx == TxRxType.Tx)
+                {
+                    msg.Set_Signal_RawValue(_SignalList.First(p => p.Name == signalName), RawValue);
+                    resumeByTx_Method(msg);
+                    return true;
+                }
+                else
+                {
+                    //signal is rx type, forbid setting value
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Send_Signal_RawValue(string signalName, ulong RawValue)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        public bool Send_Signal_RawValue(string signalName, uint CANid, ulong RawValue)
+        {
+            try
+            {
+                uint canid = 0;
+                if (_SignalList.Any(p => p.Name == signalName && p.CAN_ID_Ref == CANid))
+                {
+                    CAN_Signal signal = _SignalList.First(p => p.Name == signalName && p.CAN_ID_Ref == CANid);
+                    canid = signal.CAN_ID_Ref;
+                    CAN_Message msg = CAN_Matrix.First(p => p.ID == canid);
+                    if (msg.TxRx == TxRxType.Tx)
+                    {
+                        msg.Set_Signal_RawValue(signal, RawValue);
+                        resumeByTx_Method(msg);
+                        return true;
+                    }
+                    else
+                    {
+                        //signal is rx type, forbid setting value
+                        return false;
+                    }
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Set_Signal_PhysicValue(string signalName, uint CANid, double signal_PhysicValue)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        public void Set_Signal_Rolling(string signalName, double start_value, double rolling_Step, double rolling_maxValue, double rolling_minValue, uint id = 0, int rolling_Step_samples = 1)
+        {
+            try
+            {
+                if (_SignalList.Any(p => p.Name == signalName))
+                {
+                    CAN_Signal thisSignal;
+                    if (id == 0)
+                    {
+                        id = _SignalList.First(p => p.Name == signalName).CAN_ID_Ref;
+                        thisSignal = _SignalList.First(p => p.Name == signalName);
+                    }
+                    else
+                    {
+                        thisSignal = _SignalList.First(p => p.Name == signalName && p.CAN_ID_Ref == id);
+                    }
+                    CAN_Message msg = CAN_Matrix.First(p => p.ID == id);
+                    if (msg.TxRx == TxRxType.Tx)
+                    {
+                        // msg.Set_Signal_PhysicalValue(thisSignal, start_value);
+                        Message_State state = msg.State;
+                        msg.State = Message_State.Paused;
+                        thisSignal.Rolling_Step = rolling_Step;
+                        thisSignal.Rolling_MaxValue = rolling_maxValue;
+                        thisSignal.Rolling_MinValue = rolling_minValue;
+                        thisSignal.isRolling = true;
+                        thisSignal.rolling_Step_samples = rolling_Step_samples;
+                        msg.State = state;
+                        return;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Set_Signal_Rolling(string signalName, double start_value, double rolling_Step, double rolling_maxValue, double rolling_minValue)\n{0}\n{1}", ex.Message, ex.StackTrace));
+            }
+        }
+        public void Active_Signal_Rolling(string signalName, bool isActive = true, uint id = 0)
+        {
+            if (CAN_Matrix.Count > 0 && _SignalList.Count > 0 && _SignalList.Any(p => p.Name == signalName && p.CAN_ID_Ref == id))
+            {
+
+                CAN_Message msg = CAN_Matrix.First(p => p.ID == id);
+
+                CAN_Signal msg_signal = _SignalList.First(p => p.Name == signalName && p.CAN_ID_Ref == id);
+
+                msg_signal.isRolling = isActive;
+
+                if (isActive)
+                {
+
+                    msg.rolling_Active = true;
+                    msg.State = Message_State.Active;
+                }
+                else //否则遍历这条消息的信号中的使能都为false，则把消息的使能=false
+                {
+                    foreach (var signal in msg.Signals)
+                    {
+                        if (signal.isRolling)
+                        {
+                            msg.rolling_Active = true;
+                            return;
+                        }
+                        else { msg.rolling_Active = false; }
+                    }
+
+                }
+            }
+
+        }
+        public void reset_Rolling(uint canid, string signalName)//复位rolling累加值
+        {
+            if (_SignalList.Count > 0 && _SignalList.Any(p => p.Name == signalName && p.CAN_ID_Ref == canid))
+            {
+                CAN_Signal signal = _SignalList.First(p => p.Name == signalName && p.CAN_ID_Ref == canid);
+                CAN_Message msg = CAN_Matrix.First(p => p.ID == canid);
+
+                signal.Rolling_all = 0;
+                signal.rolling_Step_samples = 1;
+                signal.Rolling_MinValue = signal.Minimum;
+                signal.Rolling_MaxValue = signal.Maximum;
+                signal.Rolling_Step = 0;
+                signal.Rolling_Step_Frac = 0;
+                signal.rolling_Step_samples_index = 0;
+                msg.Set_Signal_PhysicalValue(signal, signal.Minimum);
+            }
+        }
+        public void Set_MultiSignal_Rolling(params CAN_Signal[] signals)
+        {
+            try
+            {
+                uint canid = 0;
+                foreach (var item in signals)
+                {
+                    if (_SignalList.Any(p => p.Name == item.Name))
+                    {
+                        CAN_Signal thisSignal = _SignalList.First(p => p.Name == item.Name);
+                        canid = thisSignal.CAN_ID_Ref;
+
+                        CAN_Message msg = CAN_Matrix.First(p => p.ID == canid);
+                        if (msg.TxRx == TxRxType.Tx)
+                        {
+                            msg.Set_Signal_PhysicalValue(thisSignal, item.Value);
+                            Message_State state = msg.State;
+                            msg.State = Message_State.Paused;
+                            thisSignal.Rolling_Step = item.Rolling_Step;
+                            thisSignal.Rolling_MaxValue = item.Rolling_MaxValue;
+                            thisSignal.Rolling_MinValue = item.Rolling_MinValue;
+                            thisSignal.isRolling = true;
+                            msg.State = state;
+                        }
+                        else
+                        {
+                            //signal is rx type, forbid setting value
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        //no such signal in dbc
+                        continue;
+                    }
+                    Thread.Sleep(1);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Set_MultiSignal_Rolling(params CAN_Signal[] signals)\n{0}\n{1}", ex.Message, ex.StackTrace));
+            }
+        }
+
+        public void Set_Signal_Timeout(string Signal_Name, int cycleNumber)
+        {
+            try
+            {
+                if (cycleNumber <= 0 || cycleNumber > 1000)
+                    return;
+                uint canid = 0;
+                if (_SignalList.Any(p => p.Name == Signal_Name))
+                {
+                    canid = _SignalList.First(p => p.Name == Signal_Name).CAN_ID_Ref;
+                }
+                else
+                {
+                    return;
+                }
+
+                CAN_Message msg = CAN_Matrix.First(p => p.ID == canid);
+                int delayTime = (int)msg.CycleTime * cycleNumber;
+                Task.Run(() =>
+                {
+                    msg.State = Message_State.Paused;
+                    Thread.Sleep(delayTime);
+                    msg.State = Message_State.Active;
+                });
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Set_Signal_Timeout(string Signal_Name, int cycleNumber)\n{0}\n{1}", ex.Message, ex.StackTrace));
+            }
+        }
+
+        public List<SignalValueRecord> Get_Signal_ValueRecord(string name)
+        {
+            if (_SignalList.Any(p => p.Name == name))
+            {
+                List<SignalValueRecord> one = new List<SignalValueRecord>(_SignalList.First(p => p.Name == name).valueRecordList);
+                return one;
+            }
+            return new List<SignalValueRecord>();
+        }
+
+        public List<SignalValueRecord> Get_Signal_ValueRecord(string name, uint CAN_ID)
+        {
+            if (_SignalList.Any(p => p.Name == name && p.CAN_ID_Ref == CAN_ID))
+            {
+                List<SignalValueRecord> one = new List<SignalValueRecord>(_SignalList.First(p => p.Name == name && p.CAN_ID_Ref == CAN_ID).valueRecordList);
+                return one;
+            }
+            return new List<SignalValueRecord>();
+        }
+
+        #endregion
+
+        #region message operations
+        /// <summary>
+        /// <para>get CAN message structure by message name</para>
+        /// </summary>
+        /// <param name="CANMessageName">CAN message structure</param>
+        /// <returns></returns>
+        public CAN_Message GetCANMessageFromCANMatrix(string CANMessageName)
+        {
+            try
+            {
+                if (CAN_Matrix.Any(p => p.Name == CANMessageName))
+                {
+                    return CAN_Matrix.First(p => p.Name == CANMessageName);
+                }
+                else
+                {
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] GetCANMessageFromCANMatrix(string CANMessageName)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// <para>send normal CAN message one time</para>
+        /// </summary>
+        /// <param name="CANid">CAN ID</param>
+        /// <param name="dlc">data length</param>
+        /// <param name="data">array type CAN data</param>
+        /// <returns></returns>
+        public bool Send_CAN_message(uint CANid, uint dlc, byte[] data)
+        {
+            if (dlc > 8 || dlc == 0 || data == null)
+            {
+                return false;
+            }
+
+            bool state = true;
+            Pmessage pmessage = new Pmessage(CANid, (byte)dlc, data, TxRxType.Tx, false, 0, false);
+            //Log.Logger_Run(string.Format("[Send_CAN_message] ID:0x{0} dlc:{1}  data:{2}", CANid.ToString("X"), dlc.ToString(), ByteArrayToString(data)));
+            state = _driver.SendMessage(pmessage);
+            return state;
+        }
+        /// <summary>
+        /// <para>send normal CAN message one time</para>
+        /// </summary>
+        /// <param name="CANid">CAN ID</param>
+        /// <param name="dlc">data length</param>
+        /// <param name="data">array type CAN data</param>
+        /// <param name="singleWireHighVoltage">sigle wire CAN takes high voltage when this parameter sets true</param>
+        /// <returns></returns>
+        public bool Send_CAN_message(uint CANid, uint dlc, byte[] data, bool singleWireHighVoltage)
+        {
+            if (dlc > 8 || dlc == 0 || data == null)
+                return false;
+
+            bool state = true;
+            Pmessage pmessage = new Pmessage(CANid, (byte)dlc, data, TxRxType.Tx, false, 0, singleWireHighVoltage);
+            state = _driver.SendMessage(pmessage);
+            return state;
+        }
+        /// <summary>
+        /// <para>send FD CAN message one time</para>
+        /// </summary>
+        /// <param name="CANid">CAN ID</param>
+        /// <param name="dlc">data length</param>
+        /// <param name="data">array type CAN data</param>
+        /// <returns></returns>
+        public bool Send_CANFD_message(uint CANid, uint dlc, byte[] data)
+        {
+            if (!this.isFD)
+                return false;
+            if (dlc == 0 || data == null)
+                return false;
+
+            bool state = true;
+            Pmessage pmessage = new Pmessage(CANid, (byte)dlc, data, TxRxType.Tx, true, 0, false);
+            state = _driver.SendMessage(pmessage);
+            return state;
+        }
+
+        /// <summary>
+        /// <para>send normal CAN message one time</para>
+        /// </summary>
+        /// <param name="CANid">CAN ID</param>
+        /// <param name="dlc">data length</param>
+        /// <param name="data">string type CAN data</param>
+        /// <returns></returns>
+        public bool Send_CAN_message(uint CANid, uint dlc, string data)
+        {
+            if (dlc > 8 || dlc == 0 || data == null || data == "" || data.Replace(" ", "").Length % 2 != 0)
+                return false;
+
+            bool state = true;
+            Pmessage pmessage = new Pmessage(CANid, (byte)dlc, StringToByte(data), TxRxType.Tx, false, 0, false);
+            state = _driver.SendMessage(pmessage);
+            return state;
+        }
+        /// <summary>
+        /// <para>send normal CAN message one time</para>
+        /// </summary>
+        /// <param name="CANid">CAN ID</param>
+        /// <param name="dlc">data length</param>
+        /// <param name="data">string type CAN data</param>
+        /// <param name="singleWireHighVoltage">sigle wire CAN takes high voltage when this parameter sets true</param>
+        /// <returns></returns>
+        public bool Send_CAN_message(uint CANid, uint dlc, string data, bool singleWireHighVoltage)
+        {
+            if (dlc > 8 || dlc == 0 || data == null || data == "" || data.Replace(" ", "").Length % 2 != 0)
+                return false;
+
+            bool state = true;
+            Pmessage pmessage = new Pmessage(CANid, (byte)dlc, StringToByte(data), TxRxType.Tx, false, 0, singleWireHighVoltage);
+            state = _driver.SendMessage(pmessage);
+            return state;
+        }
+        public bool Send_CANFD_message(uint CANid, uint dlc, string data)
+        {
+            if (!this.isFD)
+                return false;
+            if (dlc == 0 || data == null || data == "" || data.Replace(" ", "").Length % 2 != 0)
+                return false;
+
+            bool state = true;
+            Pmessage pmessage = new Pmessage(CANid, (byte)dlc, StringToByte(data), TxRxType.Tx, true, 0, false);
+            state = _driver.SendMessage(pmessage);
+            return state;
+        }
+        #endregion
+
+        #region send single pits message by byte[] data
+        public bool Send_pits_message(uint CANid, uint dlc, byte[] data)
+        {
+            return Send_CAN_message(CANid, dlc, data);
+        }
+        public bool Send_pits_message(uint CANid, uint dlc, byte[] data, bool singleWireHighVoltage)
+        {
+            return Send_CAN_message(CANid, dlc, data, singleWireHighVoltage);
+        }
+        public bool Send_pitsFD_message(uint CANid, uint dlc, byte[] data)
+        {
+            return Send_CANFD_message(CANid, dlc, data);
+        }
+        #endregion
+
+        #region send single pits message by string data
+        public bool Send_pits_message(uint CANid, uint dlc, string data)
+        {
+            return Send_CAN_message(CANid, dlc, data);
+        }
+        public bool Send_pits_message(uint CANid, uint dlc, string data, bool singleWireHighVoltage)
+        {
+            return Send_CAN_message(CANid, dlc, data, singleWireHighVoltage);
+        }
+        public bool Send_pitsFD_message(uint CANid, uint dlc, string data)
+        {
+            return Send_CANFD_message(CANid, dlc, data);
+        }
+        #endregion
+
+        #region send cyclic can message by byte[] data
+        public void Send_cyclic_CAN_message(uint CANid, uint dlc, byte[] data, uint cycleTime)
+        {
+            try
+            {
+                if (dlc > 8 || dlc == 0 || data == null)
+                    return;
+                if (dlc < data.Length)
+                {
+                    data = data.Take((int)dlc).ToArray();
+                }
+                else if (dlc > data.Length)
+                {
+                    int a = (int)dlc - data.Length;
+                    List<byte> b = data.ToList();
+                    for (int i = 0; i < a; i++)
+                    {
+                        b.Add(0);
+                    }
+                    data = b.ToArray();
+                }
+
+                if (_CAN_TxCyclicList.Any(p => p.ID == CANid))//canid is already in tx list
+                {
+                    //update msg in tx list
+                    CAN_Message msg = _CAN_TxCyclicList.First(p => p.ID == CANid);
+                    msg.DLC = dlc;
+                    msg.Data = data;
+                    msg.CycleTime = cycleTime;
+                    msg.Type = ConvertToMsgType(CANid, false);
+                    msg.State = Message_State.Active;
+                }
+                else//canid is already in tx list
+                {
+                    CAN_Message New_One = new CAN_Message(CANid, dlc, data, cycleTime, Message_State.Active, TxRxType.Tx);
+                    New_One.Method = Tx_Method.Cyclic;
+                    New_One.Type = ConvertToMsgType(CANid, false);
+                    _CAN_TxCyclicList.Add(New_One);
+                    if (CAN_Matrix_EXTRA.Any(p => p.ID == CANid))
+                    {
+                        CAN_Message one = CAN_Matrix_EXTRA.First(p => p.ID == CANid);
+                        CAN_Matrix_EXTRA.Remove(one);
+                    }                    
+                    
+                    _CAN_Matrix_EXTRA.Add(New_One);                    
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Send_cyclic_CAN_message(uint CANid, uint dlc, byte[] data, uint cycleTime)\n{0}\n{1}", ex.Message, ex.StackTrace));
+            }
+        }
+        public void Send_cyclic_CANFD_message(uint CANid, uint dlc, byte[] data, uint cycleTime)
+        {
+            try
+            {
+                if (!this.isFD)
+                    return;
+
+                if (dlc == 0 || data == null)
+                    return;
+                if (dlc < data.Length)
+                {
+                    data = data.Take((int)dlc).ToArray();
+                }
+                else if (dlc > data.Length)
+                {
+                    int a = (int)dlc - data.Length;
+                    List<byte> b = data.ToList();
+                    for (int i = 0; i < a; i++)
+                    {
+                        b.Add(0);
+                    }
+                    data = b.ToArray();
+                }
+
+                if (_CAN_TxCyclicList.Any(p => p.ID == CANid))//canid is already in tx list
+                {
+                    //update msg in tx list
+                    CAN_Message msg = _CAN_TxCyclicList.First(p => p.ID == CANid);
+                    msg.DLC = dlc;
+                    msg.Data = data;
+                    msg.CycleTime = cycleTime;
+                    msg.Type = ConvertToMsgType(CANid, true);
+                    msg.State = Message_State.Active;
+                }
+                else//canid is already in tx list
+                {
+                    CAN_Message New_One = new CAN_Message(CANid, dlc, data, cycleTime, Message_State.Active, TxRxType.Tx);
+                    New_One.Method = Tx_Method.Cyclic;
+                    New_One.Type = ConvertToMsgType(CANid, true);
+                    _CAN_TxCyclicList.Add(New_One);
+                    if (CAN_Matrix_EXTRA.Any(p => p.ID == CANid))
+                    {
+                        CAN_Message one = CAN_Matrix_EXTRA.First(p => p.ID == CANid);
+                        CAN_Matrix_EXTRA.Remove(one);
+                    }
+
+                    _CAN_Matrix_EXTRA.Add(New_One);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Send_cyclic_CANFD_message(uint CANid, uint dlc, byte[] data, uint cycleTime)\n{0}\n{1}", ex.Message, ex.StackTrace));
+            }
+        }
+        #endregion
+
+        #region send cyclic can message by string data
+        public void Send_cyclic_CAN_message(uint CANid, uint dlc, string data, uint cycleTime)
+        {
+            Send_cyclic_CAN_message(CANid, dlc, StringToByte(data), cycleTime);
+        }
+        public void Send_cyclic_CANFD_message(uint CANid, uint dlc, string data, uint cycleTime)
+        {
+            Send_cyclic_CANFD_message(CANid, dlc, StringToByte(data), cycleTime);
+        }
+        #endregion
+
+        #region send cyclic pits message by byte[] data
+        public void Send_cyclic_pits_message(uint CANid, uint dlc, byte[] data, uint cycleTime)
+        {
+            try
+            {
+                if (dlc > 8 || dlc == 0 || data == null)
+                    return;
+                if (dlc < data.Length)
+                {
+                    data = data.Take((int)dlc).ToArray();
+                }
+                else if (dlc > data.Length)
+                {
+                    int a = (int)dlc - data.Length;
+                    List<byte> b = data.ToList();
+                    for (int i = 0; i < a; i++)
+                    {
+                        b.Add(0);
+                    }
+                    data = b.ToArray();
+                }
+
+                for (int i = 0; i < PITS_Matrix.Count; i++)
+                {
+                    if (PITS_Matrix[i].ID == CANid && Convert.ToInt16(PITS_Matrix[i].Type) < 2 && Enumerable.SequenceEqual(PITS_Matrix[i].Data, data))
+                    {
+                        PITS_Matrix[i].CycleTime = cycleTime;
+                        PITS_Matrix[i].TxRx = TxRxType.Tx;
+                        PITS_Matrix[i].Method = Tx_Method.Cyclic;
+                        if (PITS_Matrix[i].State == Message_State.Paused)
+                            PITS_Matrix[i].State = Message_State.Active;
+                        return;
+                    }
+                }
+
+                CAN_Message New_One = new CAN_Message(CANid, dlc, data, cycleTime, Message_State.Active, TxRxType.Tx);
+                New_One.Method = Tx_Method.Cyclic;
+                New_One.Type = ConvertToMsgType(CANid, false);
+                PITS_Matrix.Add(New_One);
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Send_cyclic_pits_message(uint CANid, uint dlc, byte[] data, uint cycleTime)\n{0}\n{1}", ex.Message, ex.StackTrace));
+            }
+        }
+        public void Send_cyclic_pitsFD_message(uint CANid, uint dlc, byte[] data, uint cycleTime)
+        {
+            try
+            {
+                if (!this.isFD)
+                    return;
+                if (dlc == 0 || data == null)
+                    return;
+                if (dlc < data.Length)
+                {
+                    data = data.Take((int)dlc).ToArray();
+                }
+                else if (dlc > data.Length)
+                {
+                    int a = (int)dlc - data.Length;
+                    List<byte> b = data.ToList();
+                    for (int i = 0; i < a; i++)
+                    {
+                        b.Add(0);
+                    }
+                    data = b.ToArray();
+                }
+
+                for (int i = 0; i < PITS_Matrix.Count; i++)
+                {
+                    if (PITS_Matrix[i].ID == CANid && Convert.ToInt16(PITS_Matrix[i].Type) > 1 && Enumerable.SequenceEqual(PITS_Matrix[i].Data, data))
+                    {
+                        PITS_Matrix[i].CycleTime = cycleTime;
+                        PITS_Matrix[i].TxRx = TxRxType.Tx;
+                        PITS_Matrix[i].Method = Tx_Method.Cyclic;
+                        if (PITS_Matrix[i].State == Message_State.Paused)
+                            PITS_Matrix[i].State = Message_State.Active;
+                        return;
+                    }
+                }
+                CAN_Message New_One = new CAN_Message(CANid, dlc, data, cycleTime, Message_State.Active, TxRxType.Tx);
+                New_One.Method = Tx_Method.Cyclic;
+                New_One.Type = ConvertToMsgType(CANid, true);
+                PITS_Matrix.Add(New_One);
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Send_cyclic_pitsFD_message(uint CANid, uint dlc, byte[] data, uint cycleTime)\n{0}\n{1}", ex.Message, ex.StackTrace));
+            }
+        }
+        #endregion
+
+        #region send cyclic pits message by string data
+        public void Send_cyclic_pits_message(uint CANid, uint dlc, string data, uint cycleTime)
+        {
+            Send_cyclic_pits_message(CANid, dlc, StringToByte(data), cycleTime);
+        }
+        public void Send_cyclic_pitsFD_message(uint CANid, uint dlc, string data, uint cycleTime)
+        {
+            Send_cyclic_pitsFD_message(CANid, dlc, StringToByte(data), cycleTime);
+        }
+        #endregion
+
+        #region Resume and pause cyclic message
+        public void Resume_cyclic_message(uint CANid)
+        {
+            try
+            {
+                for (int i = 0; i < _CAN_TxCyclicList.Count; i++)
+                {
+                    if (_CAN_TxCyclicList[i].ID == CANid)
+                    {
+                        _CAN_TxCyclicList[i].State = Message_State.Active;
+                        return;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Resume_cyclic_message(uint CANid)\n{0}\n{1}", ex.Message, ex.StackTrace));
+            }
+        }
+
+        public void Pause_cyclic_message(uint CANid)
+        {
+            try
+            {
+                for (int i = 0; i < _CAN_TxCyclicList.Count; i++)
+                {
+                    if (_CAN_TxCyclicList[i].ID == CANid)
+                    {
+                        _CAN_TxCyclicList[i].State = Message_State.Paused;
+                        break;
+                    }
+                }
+                for (int i = 0; i < PITS_Matrix.Count; i++)
+                {
+                    if (PITS_Matrix[i].ID == CANid)
+                    {
+                        PITS_Matrix[i].State = Message_State.Paused;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Pause_cyclic_message(uint CANid)\n{0}\n{1}", ex.Message, ex.StackTrace));
+            }
+        }
+
+        public void Resume_cyclic_pits_message(uint CANid, string data)
+        {
+            try
+            {
+                for (int i = 0; i < PITS_Matrix.Count; i++)
+                {
+                    if (PITS_Matrix[i].ID == CANid && PITS_Matrix[i].sData.Replace(" ", "") == data.Replace(" ", ""))
+                    {
+                        PITS_Matrix[i].State = Message_State.Active;
+                        return;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Resume_cyclic_pits_message(uint CANid, string data)\n{0}\n{1}", ex.Message, ex.StackTrace));
+            }
+        }
+
+        public void Pause_cyclic_pits_message(uint CANid, string data)
+        {
+            try
+            {
+                for (int i = 0; i < PITS_Matrix.Count; i++)
+                {
+                    if (PITS_Matrix[i].ID == CANid && PITS_Matrix[i].sData.Replace(" ", "") == data.Replace(" ", ""))
+                    {
+                        PITS_Matrix[i].State = Message_State.Paused;
+                        return;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Pause_cyclic_pits_message(uint CANid, string data)\n{0}\n{1}", ex.Message, ex.StackTrace));
+            }
+        }
+
+        public void Pause_allCyclic_message()
+        {
+            CANcyclePause = 1;
+            PITScyclePause = 1;
+
+            if (_swcWakeTimer_hasSet)
+            {
+                _swcWakeTimer.Stop();
+                _swcWakeTimer.Elapsed -= new ElapsedEventHandler(Handler_swcWakeup);
+                _swcWakeTimer.Dispose();
+                _swcWakeTimer_hasSet = false;
+            }
+        }
+
+        public void Resume_allCyclic_message()
+        {
+            CANcyclePause = 2;
+            PITScyclePause = 2;
+        }
+        #endregion
+
+        #region Diag signal operations
+        /// <summary>
+        /// <para>import diagnostic file to this channel.</para>
+        /// <para>alternative functions:</para>
+        /// </summary>
+        /// <param name="Diag_Path">Diagnostic file absolute path</param>
+        /// <returns></returns>
+        public bool Import_DiagFile(string Diag_Path)
+        {
+            try
+            {
+                DiagFilePath = Diag_Path;
+                if (!File.Exists(DiagFilePath))
+                {
+                    return false;
+                }
+                Thread.Sleep(15);
+                ClearDiagList();
+                LoadDiagFile();
+                initNRC();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("catch exception: Import_DiagFile()\n{0}\n{1}", ex.Message, ex.StackTrace));
+                ClearDiagList();
+                return false;
+            }
+        }
+        public void setDiagID(uint reqID, uint resID)//设置diagnositic ID
+        {
+            diagReq_ID = reqID;
+            diagRes_ID = resID;
+        }
+        public bool Set_DiagSignal(string DIDname, string diagSignalName, double signalValue)//only set,do not send
+        {
+            try
+            {
+                if (_Diag_Matrix.Any(p => p.DIDname == DIDname && p.did_signals.Any(q=>q.Diag_signalName==diagSignalName)))
+                {
+                    Diag_DID did = _Diag_Matrix.First(p => p.DIDname == DIDname);
+                    Diag_Signal didSignal = did.did_signals.First(p => p.Diag_signalName == diagSignalName);
+                    if (did.DIDType == DIDType.ReadWrite || did.DIDType == DIDType.Control || did.DIDType == DIDType.Send || did.DIDType == DIDType.TransferData)
+                    {
+                        did.Set_signal_wripper(didSignal, signalValue);
+                        return true;
+                    }
+                    else
+                    {
+                        //signal is read type, forbid setting value
+                        return false;
+                    }
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return false;
+                }              
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception]  Set_DiagSignal(string DIDname, string diagSignalName, ulong signalValue) \n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+        public bool Set_DiagSignal_Hex(string DIDname, string diagSignalName, string hex_signalData)
+        {
+            try
+            {
+                if (_Diag_Matrix.Any(p => p.DIDname == DIDname && p.did_signals.Any(q => q.Diag_signalName == diagSignalName)))
+                {
+                    Diag_DID did = _Diag_Matrix.First(p => p.DIDname == DIDname);
+                    Diag_Signal didSignal = did.did_signals.First(p => p.Diag_signalName == diagSignalName);
+                    if (did.DIDType == DIDType.ReadWrite || did.DIDType == DIDType.Control || did.DIDType == DIDType.Send || did.DIDType == DIDType.TransferData)
+                    {
+                        if(didSignal.bitLength < 8 || didSignal.valueTable.Count!=0)
+                        {
+                            var value = hex2Decimal(hex_signalData.Replace(" ", ""));
+                            if (value > didSignal.maxValue)
+                            {
+                                value = didSignal.maxValue;
+                            }
+                            if (value < didSignal.minValue)
+                            {
+                                value = didSignal.minValue;
+                            }
+                            did.Set_signal_wripper(didSignal, value);
+                        }
+                        else
+                        //if (didSignal.bitLength >= 64 || didSignal.dataFormat == dataFormat.dec)
+                            did.Set_signal_hex(didSignal, hex_signalData);
+                        
+                           
+                        return true;
+                    }
+                    else
+                    {
+                        //signal is read type, forbid setting value
+                        return false;
+                    }
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return false;
+                }
+
+
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception]  Set_DiagSignal(string DIDname, string diagSignalName, ulong signalValue) \n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        public Diag_DID WriteDiagSignal(string DIDname, string diagSignalName="", double signalValue =0,int timeout = 1500)//set and send
+        {           
+            if (_Diag_Matrix.Any(p => p.DIDname == DIDname))
+            {
+                Send_DiagSignal(DIDname, diagSignalName, signalValue, "", RWStatus.Write);
+                waitDID(timeout);
+                return _Diag_Matrix.First(p => p.DIDname == DIDname);
+            }
+            return null;
+        }
+
+        public Diag_DID WriteDiagSignal_Hex(string DIDname, string diagSignalName, string hex_signalData, int timeout = 1500)
+        {    
+            if (_Diag_Matrix.Any(p => p.DIDname == DIDname))
+            {
+                Send_DiagSignal(DIDname, diagSignalName, 0, hex_signalData, RWStatus.Write, true);
+                waitDID(timeout);
+                return _Diag_Matrix.First(p => p.DIDname == DIDname);
+            }
+            return null;
+        }
+
+        public double ReadDiagSignal(string DIDname, string diagSignalName,int timeout = 1500)//return physical
+        {
+            Send_DiagSignal(DIDname, diagSignalName, 0,"", RWStatus.Read);
+            waitDID(timeout);
+            double returnValue = -999999;
+            if (_Diag_Matrix.Any(p => p.DIDname == DIDname && p.did_signals.Any(q=>q.Diag_signalName==diagSignalName)))
+            {
+                Diag_DID did = _Diag_Matrix.First(p => p.DIDname == DIDname);
+                Diag_Signal diagSignal= did.did_signals.First(p=>p.Diag_signalName==diagSignalName);
+                if(did.respondStatus==respondStatus.positive)
+                    returnValue= diagSignal.value;
+                else
+                    returnValue= - 999999;
+            }
+            return returnValue;
+        }
+        public string ReadDiagSignal_Hex(string DIDname, string diagSignalName, int timeout = 1500)//return hex,dec or text(ascii)
+        {
+            try
+            {
+                Send_DiagSignal(DIDname, diagSignalName, 0,"", RWStatus.Read);
+                waitDID(timeout);
+                string returnValue = "";
+                if (_Diag_Matrix.Any(p => p.DIDname == DIDname && p.did_signals.Any(q => q.Diag_signalName == diagSignalName)))
+                {
+                    Diag_DID did = _Diag_Matrix.First(p => p.DIDname == DIDname);
+                    Diag_Signal diagSignal = did.did_signals.First(p => p.Diag_signalName == diagSignalName);
+                    if (did.respondStatus == respondStatus.positive)
+                    {                    
+                        if (diagSignal.dataFormat == dataFormat.text)
+                        {                           
+                            returnValue = diagSignal.text;
+                        }
+                        else
+                        {
+                            returnValue = diagSignal.hexData;
+                        }
+                    }
+
+                    else
+                        returnValue = "";
+                }
+                return returnValue;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] ReadDiagSignal_Hex()\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return "";
+            }
+
+        }
+        public Diag_DID ReadDiag(string DIDname,int timeout=1500)
+        {
+            Send_DiagSignal(DIDname, "", 0,"", RWStatus.Read);
+            waitDID(timeout);
+            if (_Diag_Matrix.Any(p => p.DIDname == DIDname))
+            {
+                return _Diag_Matrix.First(p => p.DIDname == DIDname);
+            }
+            return null;
+
+        }
+
+        public byte[] Send_DiagRawdata(byte[] DiagRawdata, int timeout=1500)//eg.send 1A 20,return 5A 20 XX XX ...
+        {
+            diagMsgList = split15765(DiagRawdata.ToList());
+
+            CAN_Message msg = CAN_Matrix.First(p => p.ID == diagReq_ID);
+
+            // send first frame
+            waitFlag = false;
+            Pmessage temp_msg = new Pmessage(diagReq_ID, Convert.ToByte(diagMsgList[0].Count()), diagMsgList[0], TxRxType.Tx, (Convert.ToInt16(msg.Type) > 1), 0);
+            _driver.SendMessage(temp_msg);
+            waitDID(timeout);
+            if (validDataReceived != null)
+                return validDataReceived.ToArray();
+            else
+                return null;
+
+        }
+
+        public async void TPcontrol(bool start, int dlc=2,int tpcycle = 4000)
+        {
+            try
+            {
+                if (start)
+                {
+                    CancellationTokenSource_TP = new CancellationTokenSource();
+                    await testerPresent(CancellationTokenSource_TP.Token, dlc, tpcycle);
+                }
+                else
+                {
+                    CancellationTokenSource_TP.Cancel();
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Operation was cancelled. 
+            }
+            catch (Exception ex)
+            {
+
+            }
+          
+        }
+        
+
+        #endregion
+
+        public void Wakeup_SWC()
+        {
+            if (!_swcWakeTimer_hasSet)
+            {
+                _swcWakeTimer = new System.Timers.Timer(1000);
+                _swcWakeTimer.AutoReset = true;
+                _swcWakeTimer.Elapsed += new ElapsedEventHandler(Handler_swcWakeup);
+                _swcWakeTimer.Start();
+                _swcWakeTimer_hasSet = true;
+            }
+        }
+
+        public void Wakeup_SWC(int count)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                Send_CAN_message(0x100, 1, "00", true);
+                Thread.Sleep(10);
+            }
+        }
+
+        public bool Change_Message_cycleTime(uint CAN_ID, uint cycleTime)
+        {
+            try
+            {
+                if (_CAN_TxCyclicList.Any(p => p.ID == CAN_ID))
+                {
+                    _CAN_TxCyclicList.First(p => p.ID == CAN_ID).CycleTime = cycleTime;
+                    _CAN_TxCyclicList.First(p => p.ID == CAN_ID).Method = Tx_Method.Cyclic;
+                    return true;
+                }
+                else
+                {
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Change_Message_cycleTime(uint CAN_ID, uint cycleTime)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        public string Get_Message_Data(uint CAN_ID)
+        {
+            try
+            {
+                if (CAN_Matrix.Any(p => p.ID == CAN_ID))
+                {
+                    return CAN_Matrix.First(p => p.ID == CAN_ID).sData;
+                }
+                else
+                {
+                    return "";
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Get_Message_Data(uint CAN_ID)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return "";
+            }
+        }
+
+        public long Get_Message_FirstReceivedTimeMs(uint CAN_ID)
+        {
+            try
+            {
+                if (CAN_Matrix_EXTRA.Any(p => p.ID == CAN_ID))  //first check
+                {
+                    return CAN_Matrix_EXTRA.First(p => p.ID == CAN_ID).FirstReceivedTimeMs;
+                }
+                else if (CAN_Matrix.Any(p => p.ID == CAN_ID))
+                {
+                    return CAN_Matrix.First(p => p.ID == CAN_ID).FirstReceivedTimeMs;
+                }
+                else
+                {
+                    return 99;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Get_Message_FirstReceivedTimeMs(uint CAN_ID)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return 99;
+            }
+        }
+
+        public long Get_LINMessage_FirstReceivedTimeMs()
+        {
+            try
+            {
+                return LIN_FirstReceivedTimeMs;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Get_LINMessage_FirstReceivedTimeMs(uint CAN_ID)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return 99;
+            }
+        }
+        #endregion
+
+        #region lin functions
+        public bool Connect_Lin(bool is_master)
+        {
+            try
+            {
+                Log.Logger_Run(string.Format("[channel connect] try to connect CAN_Channel."));
+                if (IsConnected == true)
+                {
+                    Log.Logger_Run(string.Format("[channel connect] Warn! channel not need connect, it connect before."));
+                    return true;
+                }
+
+                Log.Logger_Run(string.Format("[channel connect] try to connect LIN channel."));
+                Log.Logger_Run(string.Format("[channel connect] Device Name: {0}.", _DeviceName));
+                Log.Logger_Run(string.Format("[channel connect] Channel ID: {0}.", _ChannelID));
+                Log.Logger_Run(string.Format("[channel connect] LIN version: {0}.", _LIN_Parameter.LINversion.ToString()));
+                Log.Logger_Run(string.Format("[channel connect] Baudrate: {0}.", _LIN_Parameter.Baudrate.ToString()));
+                _LINdriver = LINDriverFactory.FilterDevice(_device_type, _DeviceName, _ChannelID, _LIN_Parameter);
+
+                if (is_master)
+                {
+                    _LINdriver.LIN_Set_Master();
+                }
+                else
+                {
+                    _LINdriver.LIN_Set_Slavers(Slave_Nodes);
+                }
+
+                if (_LINdriver.Initialize(LIN_Parameter))
+                {
+                    if (!MessageCallBak_Regist)
+                    {
+                        _LINdriver.MessageEvent += OnLinMessageReceivedEventHandler;
+                        MessageCallBak_Regist = true;
+                    }
+                    Log.Logger_Run(string.Format("[channel connect] active LIN channel successfully!"));
+                    IsConnected = true;
+                    return true;
+                }
+                Log.Logger_Run(string.Format("[channel connect] fail to active LIN channel!"));
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Connect_Lin()\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        public bool Connect_Lin(bool is_master, string LDF_Path)
+        {
+            try
+            {
+                Log.Logger_Run(string.Format("[channel connect] try to connect CAN_Channel."));
+                if (IsConnected == true)
+                {
+                    Log.Logger_Run(string.Format("[channel connect] Warn! channel not need connect, it connect before."));
+                    return true;
+                }
+
+                if (!Import_LDF(LDF_Path))
+                {
+                    return false;
+                }
+
+                Log.Logger_Run(string.Format("[channel connect] try to connect LIN channel."));
+                Log.Logger_Run(string.Format("[channel connect] Device Name: {0}.", _DeviceName));
+                Log.Logger_Run(string.Format("[channel connect] Channel ID: {0}.", _ChannelID));
+                Log.Logger_Run(string.Format("[channel connect] LIN version: {0}.", _LIN_Parameter.LINversion.ToString()));
+                Log.Logger_Run(string.Format("[channel connect] Baudrate: {0}.", _LIN_Parameter.Baudrate.ToString()));
+                _LINdriver = LINDriverFactory.FilterDevice(_device_type, _DeviceName, _ChannelID, _LIN_Parameter);
+
+                if (is_master)
+                {
+                    _LINdriver.LIN_Set_Master();
+                }
+                else
+                {
+                    _LINdriver.LIN_Set_Slavers(Slave_Nodes);
+                }
+
+                if (_LINdriver.Initialize(LIN_Parameter))
+                {
+                    if (!MessageCallBak_Regist)
+                    {
+                        _LINdriver.MessageEvent += OnLinMessageReceivedEventHandler;
+                        MessageCallBak_Regist = true;
+                    }
+                    Log.Logger_Run(string.Format("[channel connect] active LIN channel successfully!"));
+                    IsConnected = true;
+                    return true;
+                }
+                Log.Logger_Run(string.Format("[channel connect] fail to active LIN channel!"));
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Connect_Lin()\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        public bool Disconnect_Lin()
+        {
+            Thread.Sleep(50);
+            if (MessageCallBak_Regist)
+            {
+                _LINdriver.MessageEvent -= OnLinMessageReceivedEventHandler;
+                MessageCallBak_Regist = false;
+            }
+
+            if (_LINdriver != null)
+            {
+                _LINdriver.Dispose();
+            }
+
+            IsConnected = false;
+            Lin_Matrix.Clear();
+            _LinSignalList.Clear();
+            Slave_Nodes.Clear();
+            return true;
+        }
+
+        void OnLinMessageReceivedEventHandler(Lmessage Msg)
+        {
+            try
+            {
+                if (isInImportldfProcess)
+                {
+                    return;
+                }
+
+                //if (Msg.TxRx == TxRxType.Err)  
+                //{
+
+                //}
+                //else
+                //{
+                    if (LIN_FirstReceivedTimeMs == 0)
+                        LIN_FirstReceivedTimeMs = Msg.LastReceivedTimeMs;
+
+                    LIN_Message dbcMsg = null;
+                    if (Lin_Matrix.Any(p => p.ID == Msg.ID))
+                    {
+                        dbcMsg = Lin_Matrix.First(p => p.ID == Msg.ID);
+                        CAN_Message_sampleType temp_sampleMsg = new CAN_Message_sampleType(DateTime.Now, Msg.TxRx, Msg.ID, Msg.DLC, Msg.Data);
+                        dbcMsg.Recent_10_Messages.Add(temp_sampleMsg);
+                        if (dbcMsg.Recent_10_Messages.Count > 10)
+                            dbcMsg.Recent_10_Messages.RemoveAt(0);
+
+                        dbcMsg.DLC = Msg.DLC;
+                        dbcMsg.Data = Msg.Data;
+                        //dbcMsg.TxRx = Msg.TxRx;
+                        dbcMsg.LastReceivedTimeMs = Msg.LastReceivedTimeMs;
+                        foreach (var sg in dbcMsg.Signals)
+                        {
+                            sg.valueRecordList.Add(new SignalValueRecord(sg.Value));
+                            if (sg.valueRecordList.Count > 500)
+                            { sg.valueRecordList.RemoveAt(0); }
+                        }
+                    }
+                    else
+                    {
+                        dbcMsg = new LIN_Message(Msg.ID, Msg.DLC, Msg.Data, Msg.Direction);
+                        //dbcMsg.ChannelName = FullName;
+                        dbcMsg.LastReceivedTimeMs = Msg.LastReceivedTimeMs;
+                    }
+
+                    if (ChannelLINmsgNotify != null && dbcMsg != null)
+                    {
+                        ChannelLINmsgNotify(dbcMsg);
+                    }
+                //}
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] OnFlexMessageReceivedEventHandler()\n{0}\n{1}", ex.Message, ex.StackTrace));
+            }
+        }
+
+        public bool Import_LDF(string LDF_Path)
+        {
+            try
+            {
+                if (!File.Exists(LDF_Path))
+                {
+                    return false;
+                }
+                LDFFilePath = LDF_Path;
+                isInImportldfProcess = true;
+                Thread.Sleep(15);
+                Lin_Matrix.Clear();
+                _LinSignalList.Clear();
+                Slave_Nodes.Clear();
+
+                LoadLDFFile(LDF_Path);
+
+                isInImportldfProcess = false;
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("catch exception: Import_LDF()\n{0}\n{1}", ex.Message, ex.StackTrace));
+                Lin_Matrix.Clear();
+                _LinSignalList.Clear();
+                Slave_Nodes.Clear();
+                isInImportldfProcess = false;
+                return false;
+            }
+
+        }
+
+        public bool LoadLDFFile(string LDF_Path)
+        {
+            StreamReader streamReader = new StreamReader(LDF_Path);
+            string Line = "";
+            List<LIN_Node> nodes = new List<LIN_Node> { };
+            LIN_Node node = null;
+
+            ///
+            List<string> slaves = new List<string> { };
+            ///
+
+            LIN_Message Temp_Message = null;
+
+            bool In_Nodes_Section = false;
+            bool In_Signals_section = false;
+            bool In_Frames_section = false;
+            bool In_OneFrame_section = false;
+            bool In_Nodes_attributes = false;
+            bool In_OneNode_attributes = false;
+            bool In_Configurable_Frames = false;
+            int iLineIndex = 0;
+            try
+            {
+                while ((Line = streamReader.ReadLine()) != null)
+                {
+                    iLineIndex++;
+                    Line = Line.Trim();
+                    if (Line == "" || Line.StartsWith("/*"))
+                    {
+                        continue;
+                    }
+
+                    if (Line.StartsWith("LIN_protocol_version"))
+                    {
+                        string[] Temp = Line.Split(';')[0].Split(ldf_separator, StringSplitOptions.RemoveEmptyEntries);
+                        string LIN_Version = Temp[Temp.Length - 1].Trim();
+                        ldf_settings.LIN_Parameter.LINversion = getLinVerison(LIN_Version);
+                        continue;
+                    }
+
+                    if (Line.StartsWith("LIN_speed"))
+                    {
+                        string[] Temp = Line.Split(';')[0].Split(ldf_separator, StringSplitOptions.RemoveEmptyEntries);
+                        string LIN_Speed = Temp[1].Trim();
+                        ldf_settings.LIN_Parameter.Baudrate = getLinBaudRate(LIN_Speed);  //
+                        continue;
+                    }
+
+                    //get nodes info: master, slave
+                    if (Line.StartsWith("Nodes {") && In_Nodes_Section == false)
+                    {
+                        In_Nodes_Section = true;
+                        continue;
+                    }
+
+                    if (Line.StartsWith("Schedule_tables"))
+                    {
+                        break;
+                    }
+
+                    if (In_Nodes_Section)
+                    {
+                        if (Line.StartsWith("}"))
+                        {
+                            In_Nodes_Section = false;
+                            continue;
+                        }
+
+                        string[] Temp = Line.Split(';')[0].Split(ldf_separator, StringSplitOptions.RemoveEmptyEntries);
+                        if (Temp[0].Trim() == "Master")
+                        {
+                            ldf_settings.Master = Temp[1].Trim();
+                        }
+                        else if (Temp[0].Trim() == "Slaves")
+                        {
+                            for (int i = 1; i < Temp.Length; i++)
+                            {
+                                ldf_settings.Slaves.Add(Temp[i].Trim());
+                            }
+                            In_Nodes_Section = false;
+                        }
+                        continue;
+                    }
+
+
+                    //get all signal list
+                    if (Line.StartsWith("Signals {") && In_Signals_section == false)
+                    {
+                        In_Signals_section = true;
+                        continue;
+                    }
+
+                    if (In_Signals_section)
+                    {
+                        if (Line.StartsWith("}"))  //signal end
+                        {
+                            In_Signals_section = false;
+                            continue;
+                        }
+
+                        string[] Temp = Line.Split(';')[0].Split(ldf_separator, StringSplitOptions.RemoveEmptyEntries);
+                        if (Temp.Length == 5)
+                        {
+                            CAN_Signal signal = new CAN_Signal();
+                            signal.Name = Temp[0].Trim();
+                            signal.Length = Convert.ToInt32(Temp[1].Trim());
+                            signal.Init_Value = Convert.ToDouble(Temp[2].Trim());
+                            signal.Max_Value = (((ulong)1 << signal.Length) - 1);
+                            _LinSignalList.Add(signal);
+                        }
+                        else
+                        {
+                            Console.WriteLine("Invalid line");
+                        }
+                        continue;
+                    }
+
+
+                    //get Frames
+                    if (Line.StartsWith("Frames {") && In_Frames_section == false)  //frame start
+                    {
+                        In_Frames_section = true;
+                        continue;
+                    }
+
+                    if (In_Frames_section)
+                    {
+                        if (Line.StartsWith("}") && In_OneFrame_section)  //one frame end
+                        {
+                            Lin_Matrix.Add(Temp_Message);
+                            In_OneFrame_section = false;
+                            continue;
+                        }
+
+                        if (Line.StartsWith("}") && In_OneFrame_section == false)  //frame end
+                        {
+                            In_Frames_section = false;
+                            continue;
+                        }
+
+                        string[] Temp = Line.Split(';')[0].Split(ldf_separator, StringSplitOptions.RemoveEmptyEntries);
+                        if (Temp.Length == 4)  //one frame start
+                        {
+                            In_OneFrame_section = true;
+                            Temp_Message = new LIN_Message();
+                            Temp_Message.Name = Temp[0].Trim();
+                            try
+                            {
+                                uint pp = (uint)Convert.ToInt32(Temp[1].Trim(), 16);
+                                Temp_Message.ID = (uint)Convert.ToInt32(Temp[1].Trim());  //default to 10 decimal
+                            }
+                            catch (Exception ex)
+                            {
+                                Temp_Message.ID = (uint)Convert.ToInt32(Temp[1].Trim(), 16);  //if not, try to hex decimal
+                            }
+
+                            Temp_Message.ECU = Temp[2].Trim();
+                            if (Temp_Message.ECU.ToLower() == _benchName.ToLower())
+                            {
+                                Temp_Message.TxRx = TxRxType.Rx;
+                            }
+                            else
+                            {
+                                Temp_Message.TxRx = TxRxType.Tx;
+                            }
+                            Temp_Message.DLC = (Byte)Convert.ToInt32(Temp[3].Trim());
+                            if (Temp_Message.ECU == ldf_settings.Master)  //master
+                            {
+                                Temp_Message.Direction = LINDirection.Subscriber;
+                            }
+                            else   //slave
+                            {
+                                Temp_Message.Direction = LINDirection.Publisher;
+                            }
+                        }
+                        else if (Temp.Length == 2)  // one signal added
+                        {
+                            string signal_name = Temp[0].Trim();
+                            if (_LinSignalList.Any(p => p.Name == signal_name))
+                            {
+                                CAN_Signal sg = _LinSignalList.First(p => p.Name == signal_name);
+                                sg.StartBit = Convert.ToInt32(Temp[1].Trim());
+                                sg.CAN_ID_Ref = Temp_Message.ID;  //Added
+                                Temp_Message.Set_Signal_RawValue(sg, (ulong)sg.Init_Value);
+                                Temp_Message.Signals.Add(sg);
+                            }
+                        }
+                        continue;
+                    }
+
+                    //get salve node details
+                    if (Line.StartsWith("Node_attributes"))
+                    {
+                        In_Nodes_attributes = true;
+                        continue;
+                    }
+
+                    if (In_Nodes_attributes)
+                    {
+                        if (Line.StartsWith("}"))  //Node_attributes end
+                        {
+                            if (In_Configurable_Frames)
+                            {
+                                In_Configurable_Frames = false;
+                                continue;
+                            }
+
+                            if (In_OneNode_attributes == false)
+                            {
+                                In_Nodes_attributes = false;
+                            }
+                            else if (In_OneNode_attributes)
+                            {
+                                if (Lin_Matrix.Any(p => p.ECU == node.Name))
+                                {
+                                    List<LIN_Message> lin_msg = Lin_Matrix.FindAll(p => p.ECU == node.Name).ToList();
+                                    foreach (LIN_Message _msg in lin_msg)
+                                    {
+                                        if (node.Lin_Protocol == LIN_Verison.LIN_1_3)
+                                        {
+                                            _msg.CheckSumType = LINChecksumType.Classic;
+                                        }
+                                        else
+                                        {
+                                            _msg.CheckSumType = LINChecksumType.Enhanced;
+                                        }
+                                    }
+                                }
+                                Slave_Nodes.Add(node);
+                                In_OneNode_attributes = false;
+                            }
+                            continue;
+                        }
+
+
+                        string[] Temp = Line.Split(';')[0].Split(ldf_separator, StringSplitOptions.RemoveEmptyEntries);
+                        //Log.Logger_Run("In_Nodes_attributes: " + Temp[0].Trim());
+
+                        if (Temp.Length == 1 && In_OneNode_attributes == false)
+                        {
+                            In_OneNode_attributes = true;
+                            node = new LIN_Node();
+                            node.Name = Temp[0].Trim();
+                        }
+                        else if (Temp.Length == 1 && In_OneNode_attributes)
+                        {
+                            if (Temp[0].Trim() == "configurable_frames")
+                            {
+                                In_Configurable_Frames = true;
+                            }
+                            else
+                            {
+                                if (In_Configurable_Frames)
+                                {
+                                    if (Lin_Matrix.Any(p => p.Name == Temp[0].Trim()))
+                                    {
+                                        LIN_Message msg = Lin_Matrix.First(p => p.Name == Temp[0].Trim());
+                                        node.Frames.Add(msg);
+                                    }
+                                }
+                            }
+                        }
+                        else if (Temp.Length >= 2 && In_OneNode_attributes)
+                        {
+                            if (Temp[0].Trim() == "LIN_protocol")
+                            {
+                                node.Lin_Protocol = getLinVerison(Temp[Temp.Length - 1].Trim());
+                            }
+                            else if (Temp[0].Trim() == "configured_NAD")
+                            {
+                                string NAD = Temp[1].Trim();
+                                node.Configured_NAD = Convert.ToInt32(NAD, 16);
+                            }
+                        }
+                        continue;
+                    }
+                }
+                streamReader.Close();
+                streamReader.Dispose();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("catch exception: LoadLDFFile() in Line{2}: {3}\n{0}\n{1}", ex.Message, ex.StackTrace, iLineIndex, Line));
+                streamReader.Close();
+                streamReader.Dispose();
+                return false;
+            }
+        }
+
+        private LIN_Verison getLinVerison(string lin_version)
+        {
+            LIN_Verison _version = LIN_Verison.LIN_2_1;
+            switch (lin_version)
+            {
+                case "1.3":
+                    _version = LIN_Verison.LIN_1_3;
+                    break;
+                case "2.0":
+                    _version = LIN_Verison.LIN_2_0;
+                    break;
+                case "2.1":
+                    _version = LIN_Verison.LIN_2_1;
+                    break;
+                case "J2602_0_0.0":
+                    _version = LIN_Verison.J2602_0_0;
+                    break;
+                case "J2602_1_1.0":
+                    _version = LIN_Verison.J2602_1_1;
+                    break;
+                case "J2602_1_2.0":
+                    _version = LIN_Verison.J2602_1_2;
+                    break;
+                default:
+                    _version = LIN_Verison.LIN_2_1;
+                    break;
+            }
+            return _version;
+        }
+
+        private LINBaudRate getLinBaudRate(string baudrate)
+        {
+            LINBaudRate _baudrate = LINBaudRate.Baud_19200;
+            switch (baudrate)
+            {
+                case "19.2":
+                    _baudrate = LINBaudRate.Baud_19200;
+                    break;
+                case "10.4":
+                    _baudrate = LINBaudRate.Baud_10400;
+                    break;
+                case "10.417":
+                    _baudrate = LINBaudRate.Baud_10417;
+                    break;
+                case "2.4":
+                    _baudrate = LINBaudRate.Baud_2400;
+                    break;
+                case "9.6":
+                    _baudrate = LINBaudRate.Baud_9600;
+                    break;
+                case "20.0":
+                    _baudrate = LINBaudRate.Baud_20000;
+                    break;
+                default:
+                    _baudrate = LINBaudRate.Baud_19200;
+                    break;
+            }
+
+            return _baudrate;
+        }
+
+        public void Send_LIN_Message(LIN_Message msg)
+        {
+            _LINdriver.Send(msg);
+        }
+
+        public void Send_LIN_Message(uint ID)
+        {
+            try
+            {
+                if (Lin_Matrix.Any(p => p.ID == ID))
+                {
+                    LIN_Message Message = Lin_Matrix.First(p => p.ID == ID);
+                    _LINdriver.Send(Message);
+                }
+            }
+            catch (Exception ex)
+            {
+
+            }
+        }
+
+        public void Send_LIN_Message(string frame_name)
+        {
+            try
+            {
+                if (Lin_Matrix.Any(p => p.Name == frame_name))
+                {
+                    LIN_Message Message = Lin_Matrix.First(p => p.Name == frame_name);
+                    _LINdriver.Send(Message);
+                }
+            }
+            catch (Exception ex)
+            {
+
+            }
+        }
+
+        public string Get_LINMessage_Data(uint ID)
+        {
+            try
+            {
+                if (Lin_Matrix.Any(p => p.ID == ID))
+                {
+                    return Lin_Matrix.First(p => p.ID == ID).sData;
+                }
+                else
+                {
+                    return "";
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Get_Message_Data(uint CAN_ID)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return "";
+            }
+        }
+
+        public double Get_LIN_Signal(string signalName)
+        {
+            try
+            {
+                if (_LinSignalList.Any(p => p.Name == signalName))
+                {
+                    return _LinSignalList.First(p => p.Name == signalName).Value;
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return -99.999;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Get_signal(string signalName)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return -99.999;
+            }
+        }
+
+        public double Get_LIN_Signal(uint CANid, string signalName)
+        {
+            try
+            {
+                if (_LinSignalList.Any(p => p.Name == signalName && p.CAN_ID_Ref == CANid))
+                {
+                    return _LinSignalList.First(p => p.Name == signalName && p.CAN_ID_Ref == CANid).Value;
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return -99.999;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Get_signal(uint CANid, string signalName)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return -99.999;
+            }
+        }
+
+        public CAN_Signal GetLINSignalFromLINMatrix(string signalName)
+        {
+            try
+            {
+                if (_LinSignalList.Any(p => p.Name == signalName))
+                {
+                    return _LinSignalList.First(p => p.Name == signalName);
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] GetCANSignalFromCANMatrix(string signalName)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return null;
+            }
+        }
+
+        public CAN_Signal GetLINSignalFromLINMatrix(string signalName, uint CAN_ID)
+        {
+            try
+            {
+                if (_LinSignalList.Any(p => p.Name == signalName && p.CAN_ID_Ref == CAN_ID))
+                {
+                    return _LinSignalList.First(p => p.Name == signalName && p.CAN_ID_Ref == CAN_ID);
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] GetCANSignalFromCANMatrix(string signalName, uint CAN_ID)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return null;
+            }
+        }
+
+        public bool Send_LIN_Message(uint ID, byte[] Data, uint Length, LINDirection Direction = LINDirection.Publisher, LINChecksumType ChecksumType = LINChecksumType.Enhanced)
+        {
+            try
+            {
+                //create one new LIN_Message
+                bool result = false;
+                if (Lin_Matrix.Any(p=>p.ID == ID))
+                {
+                    LIN_Message Message = Lin_Matrix.First(p => p.ID == ID);
+                    Message.Data = Data;
+                    Message.LData = Data;
+                    Message.DLC = (byte)Length;
+                    Message.Direction = Direction;
+                    Message.CheckSumType = ChecksumType;
+                    result= _LINdriver.Send(Message);
+                }
+                else
+                {
+                    LIN_Message Message = new LIN_Message();
+                    Message.Data = Data;
+                    Message.LData = Data;
+                    Message.ID = ID;
+                    Message.DLC = (byte)Length;
+                    Message.Direction = Direction;
+                    Message.CheckSumType = ChecksumType;
+                    result=_LINdriver.Send(Message);
+                }
+                return result;
+            }
+            catch (Exception ex)
+            {
+                return false;
+            }
+        }
+
+        public bool Send_LIN_Message(uint ID, string sData, uint Length, LINDirection Direction = LINDirection.Publisher, LINChecksumType ChecksumType = LINChecksumType.Enhanced)
+        {
+            try
+            {
+                //create one new LIN_Message
+                bool result = false;
+                if (Lin_Matrix.Any(p => p.ID == ID))
+                {
+                    LIN_Message Message = Lin_Matrix.First(p => p.ID == ID);
+                    Message.sData = sData;
+                    Message.DLC = (byte)Length;
+                    Message.Direction = Direction;
+                    Message.CheckSumType = ChecksumType;
+                    result=_LINdriver.Send(Message);
+                }
+                else
+                {
+                    LIN_Message Message = new LIN_Message();
+                    Message.sData = sData;
+                    Message.ID = ID;
+                    Message.DLC = (byte)Length;
+                    Message.Direction = Direction;
+                    Message.CheckSumType = ChecksumType;
+                    result=_LINdriver.Send(Message);
+                }
+                return result;
+            }
+            catch (Exception ex)
+            {
+                return false;
+            }
+        }
+
+        public bool Send_Lin_Signal(string signalName, double PhysicalValue)  // set and send
+        {
+            //this function will change LIN_Message in Lin_Matrix
+            CAN_Signal signal = null;
+            foreach (LIN_Message msg in Lin_Matrix)
+            {
+                if (msg.Signals.Any(p => p.Name == signalName))
+                {
+                    signal = msg.Signals.First(p => p.Name == signalName);
+                    msg.Set_Signal_RawValue(signal, PhysicalValue);
+                    _LINdriver.Send(msg);
+                    break;
+                }
+            }
+
+            if (signal == null)
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        public bool Send_Lin_Signal(uint ID, string signalName, double PhysicalValue)  // set and send
+        {
+            //this function will change LIN_Message in Lin_Matrix
+            CAN_Signal signal = null;
+
+            if (Lin_Matrix.Any(p => p.ID == ID))
+            {
+                LIN_Message msg = Lin_Matrix.First(p => p.ID == ID);
+                if (msg.Signals.Any(p => p.Name == signalName))
+                {
+                    signal = msg.Signals.First(p => p.Name == signalName);
+                    msg.Set_Signal_RawValue(signal, PhysicalValue);
+                    bool ret = _LINdriver.Send(msg);
+                    return ret;
+                }
+                else
+                {
+                    return false;
+                }
+            }
+
+            else
+            {
+                return false;
+            }
+        }
+        
+        public void Clear_LIN_PID(byte PID)
+        {
+            _LINdriver.Clear_PID(PID);
+        }
+
+        public bool LIN_Set_Slaver_Mode(List<LIN_Node> slaves)
+        {
+            _LINdriver.LIN_Set_Slavers(slaves);
+            return true;
+        }
+
+        public bool LIN_Set_Slaver_Mode()
+        {
+            _LINdriver.LIN_Set_Slavers(Slave_Nodes);
+            return true;
+        }
+
+        public bool LIN_Set_Master_Mode()
+        {
+            _LINdriver.LIN_Set_Master();
+            return true;
+        }
+
+        public bool LIN_Set_AutoChecksum()
+        {
+            _LINdriver.LIN_AutoChecksum_Mode();
+            return true;
+        }
+
+        public bool LIN_Set_Not_AutoChecksum()
+        {
+            _LINdriver.LIN_Not_AutoChecksum();
+            return true;
+        }
+
+        public List<SignalValueRecord> Get_LIN_Signal_ValueRecord(string name)
+        {
+            if (_LinSignalList.Any(p => p.Name == name))
+            {
+                List<SignalValueRecord> one = new List<SignalValueRecord>(_LinSignalList.First(p => p.Name == name).valueRecordList);
+                return one;
+            }
+            return new List<SignalValueRecord>();
+        }
+
+        public List<SignalValueRecord> Get_LIN_Signal_ValueRecord(string name, uint CAN_ID)
+        {
+            if (_LinSignalList.Any(p => p.Name == name && p.CAN_ID_Ref == CAN_ID))
+            {
+                List<SignalValueRecord> one = new List<SignalValueRecord>(_LinSignalList.First(p => p.Name == name && p.CAN_ID_Ref == CAN_ID).valueRecordList);
+                return one;
+            }
+            return new List<SignalValueRecord>();
+        }
+
+        public bool Check_LIN_Signal_ValueChange(string signalName, double Previous_Value, double After_Value, int msTimeout)
+        {
+            try
+            {
+                if (_LinSignalList.Count == 0)
+                {
+                    return false;
+                }
+                if (_LinSignalList.Any(p => p.Name == signalName))
+                {
+                    List<CANSignalChangeInfo> signalchaglist = new List<CANSignalChangeInfo>(_LinSignalList.First(p => p.Name == signalName).valueChangeList);
+                    DateTime TimeNow = DateTime.Now;
+                    foreach (var change in signalchaglist)
+                    {
+                        if (change.olderValue == Previous_Value && change.currentVaule == After_Value && ((TimeNow.Ticks - change.Abstime.Ticks) / 10000L <= msTimeout))
+                        {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Check_LIN_Signal_ValueChange(uint CAN_ID)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        #endregion
+
+        #region Flexray functons
+        internal FlexRay_Parameter _Flex_Parameter = new FlexRay_Parameter();
+        public FlexRay_Parameter Flex_Parameter
+        {
+            get { return _Flex_Parameter; }
+            set { _Flex_Parameter = value; OnPropertyChanged("Flex_Parameter"); }
+        }
+
+        //FlexRay rx event
+        public delegate void FlexRaymsgCallback(FlexRay_Message Msg);
+        public event FlexRaymsgCallback ChannelFlexRaymsgNotify;
+
+        public bool Connect_FlexRay(string flbex_file, bool load_flbex = true)
+        {
+            try
+            {
+                Log.Logger_Run(string.Format("[channel connect] try to connect FlexRay_Channel."));
+                if (IsConnected == true)
+                {
+                    Log.Logger_Run(string.Format("[channel connect] Warn! channel not need connect, it connect before."));
+                    return true;
+                }
+
+                if (load_flbex)
+                {
+                    if (!Import_FIBEX(flbex_file))
+                    {
+                        return false;
+                    }
+                }
+                Log.Logger_Run(string.Format("[channel connect] finish Import_FIBEX!"));
+
+                _FlexRayDriver = FlexRayDriverFactory.FilterDevice(_device_type, _DeviceName, _ChannelID, Flex_Parameter);
+                if (!InitStartupFrames("VddmBackBoneFr48", "CemBackBoneFr23"))  //hardcode the Startup Frames here
+                {
+                    return false;
+                }
+
+                if (_FlexRayDriver.Initialize(flbex_file))
+                {
+                    if (!MessageCallBak_Regist)
+                    {
+                        _FlexRayDriver.MessageEvent += OnFlexMessageReceivedEventHandler;
+                        MessageCallBak_Regist = true;
+                    }
+
+                    Log.Logger_Run(string.Format("[channel connect] active Flexray channel successfully!"));
+                    IsConnected = true;
+                    Wakup_DHU_By_Flexray();
+                    return true;
+                }
+                Log.Logger_Run(string.Format("[channel connect] fail to active Flexray channel!"));
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Connect_FlexRay()\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        public void Wakup_DHU_By_Flexray()
+        {
+            byte[] payload_nm = { 0xC0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }; 
+			//{ 144, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+            Send_FlexRay_Message_Force("BbmBackBoneNmFr01", payload_nm, 32);
+
+            byte[] payload = { 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 255, 255 };
+            Send_FlexRay_Message_Force("VgmBackBoneDiagReqFrame4", payload, 32);  //WUP = 90
+
+        }
+
+        public void Sleep_DHU_By_Flexray()
+        {
+            Pause_FlexRay_Cyclic_Message("VgmBackBoneDiagReqFrame4");
+            Thread.Sleep(1000);
+
+            byte[] payload = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+            Send_FlexRay_Message("VddmBackBoneFr48", payload, 32);
+            Send_FlexRay_Message("CemBackBoneFr23", payload, 32);
+
+            Thread.Sleep(100);
+            Send_FlexRay_Message("BbmBackBoneNmFr01", payload, 32);
+			try
+            {
+                foreach (FlexRay_Message msg in FlexRay_Matrix)
+                {
+                    if (msg.TxRx == TxRxType.Tx && msg.State == Message_State.Active)
+                    {
+                        if (msg.ID > 60)
+                        {
+                            bool state = _FlexRayDriver.Pause_FlexRay_Cyclic_Message(msg);
+                            msg.State = Message_State.Paused;
+                            Log.Logger_Run(string.Format("Pause Dynamic_Cyclic_Message:{0} ", msg.Name));
+                        }
+						/*
+                        else
+                        {
+                            msg.Data = payload;
+                            bool state = _FlexRayDriver.Send(msg);
+                        }
+						*/
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Pause_All_FlexRay_Cyclic_Message()\n{0}\n{1}", ex.Message, ex.StackTrace));
+            }
+        }
+
+        public bool DisConnect_FlexRay()
+        {
+            try
+            {
+                Log.Logger_Run(string.Format("[channel connect] try to disconnect FlexRay_Channel."));
+
+                Thread.Sleep(50);
+
+                if (MessageCallBak_Regist)
+                {
+                    _FlexRayDriver.MessageEvent -= OnFlexMessageReceivedEventHandler;
+                    MessageCallBak_Regist = false;
+                }
+
+                if (_FlexRayDriver != null)
+                {
+                    _FlexRayDriver.Dispose();
+                }
+
+                IsConnected = false;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] DisConnect_FlexRay(string signalName)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        public bool Pause_FlexRay_Cyclic_Message(string frameName)
+        {
+            if (FlexRay_Matrix.Count > 0 && FlexRay_Matrix.Any(p => p.Name == frameName))
+            {
+                FlexRay_Message message = FlexRay_Matrix.First(p => p.Name == frameName);
+                if (message.TxRx == TxRxType.Tx && message.State == Message_State.Active)
+                {
+                    bool state = _FlexRayDriver.Pause_FlexRay_Cyclic_Message(message);
+                    message.State = Message_State.Paused;
+                    return state;
+                }
+                return true;
+            }
+            return false;
+        }
+
+		public bool Pause_FlexRay_Cyclic_Message(FlexRay_Message message)
+        {
+            bool state = _FlexRayDriver.Pause_FlexRay_Cyclic_Message(message);
+            message.State = Message_State.Paused;
+            return state;
+        }		
+		
+        public void Pause_All_FlexRay_Cyclic_Message()
+        {
+            try
+            {
+                foreach (FlexRay_Message msg in FlexRay_Matrix)
+                {
+                    if (msg.TxRx == TxRxType.Tx && msg.State == Message_State.Active)
+                    {
+                        bool state = _FlexRayDriver.Pause_FlexRay_Cyclic_Message(msg);
+                        msg.State = Message_State.Paused;
+                    }
+                }                
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Pause_All_FlexRay_Cyclic_Message()\n{0}\n{1}", ex.Message, ex.StackTrace));
+            }
+        }
+
+        public void Send_All_FlexRay_Cyclic_message()
+        {
+            try
+            {
+                foreach (FlexRay_Message msg in FlexRay_Matrix)
+                {
+                    if (msg.TxRx == TxRxType.Tx)
+                    {
+                        msg.Method = FR_TX_Mode.Cyclic; //default all tx mode to cyclic
+                        msg.State = Message_State.Active;
+                        bool state = _FlexRayDriver.Send(msg);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Send_All_FlexRay_Cyclic_message()\n{0}\n{1}", ex.Message, ex.StackTrace));
+            }
+        }
+
+		public bool Send_FlexRay_Message(FlexRay_Message message)
+        {
+            try
+            {
+                if (message == null )
+                    return false;
+
+                if (message.TxRx != TxRxType.Tx)
+                {
+                    Log.Logger_Run(string.Format("Can only send TX message: {0} -- {1}", message.Name, message.TxRx));
+                    return false;
+                }
+
+                if (_device_type == Device_Type.Sapa)
+                {
+                    bool state = _FlexRayDriver.SendRawData(message);
+                    return state;
+                }
+                else
+                {
+                    bool state = _FlexRayDriver.Send(message);
+                    return state;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Send_FlexRay_Message()\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+		
+        public bool Send_FlexRay_Message(string frameName, byte[] data, uint dlc, int txMode = 1)
+        {
+            try
+            {
+                //create one new Pmessage
+                if (data == null)
+                    return false;
+
+                if (FlexRay_Matrix.Count > 0 && FlexRay_Matrix.Any(p => p.Name == frameName))
+                {
+                    FlexRay_Message message = FlexRay_Matrix.First(p => p.Name == frameName);
+                    if (message.TxRx != TxRxType.Tx )
+                    {
+                        Log.Logger_Run(string.Format("Can only send TX message: {0} -- {1}", frameName, message.TxRx));
+                        return false;
+                    }
+                    message.Data = data;
+                    message.DLC = dlc;
+                    message.TxRx = TxRxType.Tx;
+                    message.State = Message_State.Active;
+                    message.Method = txMode == 1 ? FR_TX_Mode.Cyclic : FR_TX_Mode.SingleShot;
+
+                    if (_device_type == Device_Type.Sapa)
+                    {
+                        bool state = _FlexRayDriver.SendRawData(message);
+                        return state;
+                    }
+                    else
+                    {
+                        bool state = _FlexRayDriver.Send(message);
+                        return state;
+                    }
+                }
+                else
+                {
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Send_FlexRay_Message(string signalName)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+
+        public bool Send_FlexRay_Message_Force(string frameName, byte[] data, uint dlc, int txMode = 1)
+        {
+            try
+            {
+                //create one new Pmessage
+                if (data == null)
+                    return false;
+
+                if (FlexRay_Matrix.Count > 0 && FlexRay_Matrix.Any(p => p.Name == frameName))
+                {
+                    FlexRay_Message message = FlexRay_Matrix.First(p => p.Name == frameName);
+                    message.Data = data;
+                    message.DLC = dlc;
+                    message.TxRx = TxRxType.Tx;
+                    message.State = Message_State.Active;
+                    message.Method = txMode == 1 ? FR_TX_Mode.Cyclic : FR_TX_Mode.SingleShot;
+
+                    if (_device_type == Device_Type.Sapa)
+                    {
+                        bool state = _FlexRayDriver.SendRawData(message);
+                        return state;
+                    }
+                    else
+                    {
+                        bool state = _FlexRayDriver.Send(message);
+                        return state;
+                    }
+                }
+                else
+                {
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Send_FlexRay_Message(string signalName)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        public bool Clear_FlexRay_Signal_UB(string signalName)  
+        {
+            try
+            {
+                CAN_Signal signal = null;
+                string msg_name = "";
+                if (_FlexRay_SignalList.Any(p => p.Name == signalName))
+                {
+                    signal = _FlexRay_SignalList.First(p => p.Name == signalName);
+                    msg_name = signal.name_ref;
+                    if (FlexRay_Matrix.Any(p => p.Name == msg_name))
+                    {
+                        FlexRay_Message msg = FlexRay_Matrix.First(p => p.Name == msg_name);
+                        if (msg.TxRx != TxRxType.Tx)
+                        {
+                            Log.Logger_Run(string.Format("Can only change TX message: {0} -- {1}", msg.Name, msg.TxRx));
+                            return false;
+                        }
+
+                        if (signal.UB_SignalName != "")
+                        {
+                            if (msg.Signals.Any(p => p.Name == signal.UB_SignalName))
+                            {
+                                CAN_Signal UB_signal = msg.Signals.First(p => p.Name == signal.UB_SignalName);
+                                msg.Set_Signal_RawValue(UB_signal, 0);
+                            }
+                        }
+
+                        msg.TxRx = TxRxType.Tx;
+                        msg.State = Message_State.Active;
+
+                        if (_device_type == Device_Type.Sapa)
+                        {
+                            bool state = _FlexRayDriver.ChangeSignalAndSend(msg, signal.UB_SignalName, 0);
+                            return state;
+                        }
+                        else
+                        {
+                            bool state = _FlexRayDriver.Send(msg);
+                            return state;
+                        }
+                    }
+                    else
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    return false;
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Send_FlexRay_Signal(string signalName)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+		
+        public bool Send_FlexRay_Message(string frameName, string sdata, uint dlc, int txMode = 1)
+        {
+            try
+            {
+                //create one new Pmessage
+                if (dlc == 0 || sdata == null)
+                    return false;
+
+                if (FlexRay_Matrix.Count > 0 && FlexRay_Matrix.Any(p => p.Name == frameName))
+                {
+                    FlexRay_Message message = FlexRay_Matrix.First(p => p.Name == frameName);
+                    if (message.TxRx != TxRxType.Tx)
+                    {
+                        Log.Logger_Run(string.Format("Can only change TX message: {0} --{1}", frameName, message.TxRx));
+                        return false;
+                    }
+                    message.sData = sdata;
+                    message.DLC = dlc;
+                    message.TxRx = TxRxType.Tx;
+                    message.State = Message_State.Active;
+                    message.Method = txMode == 1 ? FR_TX_Mode.Cyclic : FR_TX_Mode.SingleShot;
+
+                    if (_device_type == Device_Type.Sapa)
+                    {
+                        bool state = _FlexRayDriver.SendRawData(message);
+                        return state;
+                    }
+                    else
+                    {
+                        bool state = _FlexRayDriver.Send(message);
+                        return state;
+                    }
+                }
+                else
+                {
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Send_FlexRay_Message(string signalName,string sdata, uint dlc)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        public bool Send_FlexRay_Message(string frameName)
+        {
+            try
+            {  
+                if (FlexRay_Matrix.Count > 0 && FlexRay_Matrix.Any(p => p.Name == frameName))
+                {
+                    FlexRay_Message message = FlexRay_Matrix.First(p => p.Name == frameName);
+                    if (message.TxRx != TxRxType.Tx)
+                    {
+                        Log.Logger_Run(string.Format("Can only change TX message: {0} -- {1}", frameName, message.TxRx));
+                        return false;
+                    }
+
+                    message.TxRx = TxRxType.Tx;
+                    message.State = Message_State.Active;
+                    bool state = _FlexRayDriver.Send(message);
+                    return state;
+                }
+                else
+                {
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Send_FlexRay_Message(string signalName)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+		
+        public bool Send_FlexRay_Signal(string signalName, double physicalValue)  // set and send
+        {
+            try
+            {
+                CAN_Signal signal = null;
+                string msg_name = "";
+                if (_FlexRay_SignalList.Any(p => p.Name == signalName))
+                {
+                    signal = _FlexRay_SignalList.First(p => p.Name == signalName);
+                    msg_name = signal.name_ref;
+                    if (FlexRay_Matrix.Any(p => p.Name == msg_name))
+                    {
+                        FlexRay_Message msg = FlexRay_Matrix.First(p => p.Name == msg_name);
+                        if (msg.TxRx != TxRxType.Tx)
+                        {
+                            Log.Logger_Run(string.Format("Can only change TX message: {0} -- {1}", msg_name, msg.TxRx));
+                            return false;
+                        }
+
+                        if (signal.UB_SignalName != "")
+                        {
+                            if (msg.Signals.Any(p => p.Name == signal.UB_SignalName))
+                            {
+                                CAN_Signal UB_signal = msg.Signals.First(p => p.Name == signal.UB_SignalName);
+                                msg.Set_Signal_RawValue(UB_signal, 1);
+                            }
+                        }
+                        msg.Set_Signal_RawValue(signal, physicalValue);
+                        msg.TxRx = TxRxType.Tx;
+                        msg.State = Message_State.Active;
+
+                        if (_device_type == Device_Type.Sapa)
+                        {
+                            bool state = _FlexRayDriver.ChangeSignalAndSend(msg, signalName, (long)physicalValue);
+                            return state;
+                        }
+                        else
+                        {
+                            bool state = _FlexRayDriver.Send(msg);
+                            return state;
+                        }
+                    }
+                    else
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    return false;
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Send_FlexRay_Signal(string signalName)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        public bool Set_FlexRay_Signal(string frameName, string signalName, double physicalValue, bool send_atonce = true)  // set or send
+        {
+            try
+            {
+                CAN_Signal signal = null;
+                if (FlexRay_Matrix.Any(p => p.Name == frameName))
+                {
+                    FlexRay_Message msg = FlexRay_Matrix.First(p => p.Name == frameName);
+                    if (msg.Signals.Any(p => p.Name == signalName))
+                    {
+                        signal = msg.Signals.First(p => p.Name == signalName);
+                        if (signal.Value == physicalValue)
+                        {
+                            //Log.Logger_Run(string.Format("Same signal value. exit"));
+                            return true;
+                        }
+
+                        if (signal.UB_SignalName != "")
+                        {
+                            if (msg.Signals.Any(p => p.Name == signal.UB_SignalName))
+                            {
+                                CAN_Signal UB_signal = msg.Signals.First(p => p.Name == signal.UB_SignalName);
+                                msg.Set_Signal_RawValue(UB_signal, 1);
+                            }
+                        }                       
+
+                        msg.Set_Signal_RawValue(signal, physicalValue);
+                        signal.NewValue = physicalValue;
+
+                        //Log.Logger_Run(string.Format("Set_Signal_RawValue: {0}" , msg.Data[1]));
+
+                        msg.TxRx = TxRxType.Tx;
+                        msg.State = Message_State.Active;                        
+                        return true;
+                    }
+                    else
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Send_FlexRay_Signal(string signalName)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        public bool Send_FlexRay_Signal(string frameName, string signalName, double physicalValue)  // set and send
+        {
+            try
+            {
+                CAN_Signal signal = null;
+                if (FlexRay_Matrix.Any(p => p.Name == frameName))
+                {
+                    FlexRay_Message msg = FlexRay_Matrix.First(p => p.Name == frameName);
+                    if (msg.TxRx != TxRxType.Tx)
+                    {
+                        Log.Logger_Run(string.Format("Can only change TX message: {0}", msg.TxRx));
+                        return false;
+                    }
+                    if (msg.Signals.Any(p => p.Name == signalName))
+                    {
+                        signal = msg.Signals.First(p => p.Name == signalName);
+                        if (signal.UB_SignalName != "")
+                        {
+                            if (msg.Signals.Any(p => p.Name == signal.UB_SignalName))
+                            {
+                                CAN_Signal UB_signal = msg.Signals.First(p => p.Name == signal.UB_SignalName);
+                                msg.Set_Signal_RawValue(UB_signal, 1);
+                            }
+                        }
+
+                        msg.Set_Signal_RawValue(signal, physicalValue);
+                        msg.TxRx = TxRxType.Tx;
+                        msg.State = Message_State.Active;
+                        if (_device_type == Device_Type.Sapa)
+                        {
+                            bool state = _FlexRayDriver.ChangeSignalAndSend(msg, signalName, (long)physicalValue);
+                            return state;
+                        }
+                        else
+                        {
+                            bool state = _FlexRayDriver.Send(msg);
+                            return state;
+                        }
+                    }
+                    else
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Send_FlexRay_Signal(string signalName)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// <para>get signal vaule by signal name</para>
+        /// <para>note that value is physical value, not raw value</para>
+        /// </summary>
+        /// <param name="signalName">signal short name in dbc</param>
+        /// <returns></returns>
+        public double Get_FlexRay_Signal(string signalName)
+        {
+            try
+            {
+                if (_FlexRay_SignalList.Any(p => p.Name == signalName))
+                {
+                    return _FlexRay_SignalList.First(p => p.Name == signalName).Value;
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return -99.999;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Get_FlexRay_Signal(string signalName)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return -99.999;
+            }
+        }
+
+        public double Get_FlexRay_Signal(string frameName, string signalName)
+        {
+            try
+            {
+                if (FlexRay_Matrix.Any(p => p.Name == frameName))
+                {
+                    FlexRay_Message msg = FlexRay_Matrix.First(p => p.Name == frameName);
+                    if (msg.Signals.Any(p => p.Name == signalName))
+                    {
+                        return msg.Signals.First(p => p.Name == signalName).Value;
+                    }
+                    else
+                    {
+                        return -99.999;
+                    }
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return -99.999;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Get_FlexRay_Signal(uint CANid, string signalName)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return -99.999;
+            }
+        }
+
+        public CAN_Signal GetFlexraySignalFromMatrix(string signalName)
+        {
+            try
+            {
+                if (_FlexRay_SignalList.Any(p => p.Name == signalName))
+                {
+                    return _FlexRay_SignalList.First(p => p.Name == signalName);
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] GetFlexraySignalFromMatrix(string signalName)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return null;
+            }
+        }
+
+        public CAN_Signal GetFlexraySignalFromMatrix(string frameName, string signalName)
+        {
+            try
+            {
+                if (FlexRay_Matrix.Any(p => p.Name == frameName))
+                {
+                    FlexRay_Message msg = FlexRay_Matrix.First(p => p.Name == frameName);
+                    if (msg.Signals.Any(p => p.Name == signalName))
+                    {
+                        return msg.Signals.First(p => p.Name == signalName);
+                    }
+                    else
+                    {
+                        return null;
+                    }
+                }
+                else
+                {
+                    //no such signal in dbc
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] GetFlexraySignalFromMatrix(string signalName)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return null;
+            }
+        }
+
+        public string Get_FlexRay_Message_Data(string frameName)
+        {
+            try
+            {
+                if (FlexRay_Matrix.Any(p => p.Name == frameName))
+                {
+                    return FlexRay_Matrix.First(p => p.Name == frameName).sData;
+                }
+                else
+                {
+                    return "";
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Get_FlexRay_Message_Data(uint CAN_ID)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return "";
+            }
+        }
+
+        public List<SignalValueRecord> Get_FlexRay_Signal_ValueRecord(string signalName)
+        {
+            try
+            {
+                if (_FlexRay_SignalList.Any(p => p.Name == signalName))
+                {
+                    List<SignalValueRecord> one = new List<SignalValueRecord>(_FlexRay_SignalList.First(p => p.Name == signalName).valueRecordList);
+                    return one;
+                }
+                return new List<SignalValueRecord>();
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Get_FlexRay_Signal_ValueRecord(uint CAN_ID)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return new List<SignalValueRecord>();
+            }
+        }
+
+        public List<SignalValueRecord> Get_FlexRay_Signal_ValueRecord(string frameName, string signalName)
+        {
+            try
+            {
+                if (FlexRay_Matrix.Any(p => p.Name == frameName))
+                {
+                    FlexRay_Message msg = FlexRay_Matrix.First(p => p.Name == frameName);
+                    List<SignalValueRecord> one = new List<SignalValueRecord>(msg.Signals.First(p => p.Name == signalName).valueRecordList);
+                    return one;
+                }
+
+                return new List<SignalValueRecord>();
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Get_FlexRay_Signal_ValueRecord(uint CAN_ID)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return new List<SignalValueRecord>();
+            }
+        }
+
+        public bool Check_Signal_ValueChange(string signalName, double Previous_Value, double After_Value, int msTimeout, ref double fail_value)
+        {
+            try
+            {
+                if (_SignalList.Count == 0)
+                {
+                    return false;
+                }
+                if (_SignalList.Any(p => p.Name == signalName))
+                {
+                    List<CANSignalChangeInfo> signalchaglist = new List<CANSignalChangeInfo>(_SignalList.First(p => p.Name == signalName).valueChangeList);
+                    DateTime TimeNow = DateTime.Now;
+                    foreach (var change in signalchaglist)
+                    {
+                        if (change.olderValue == Previous_Value && change.currentVaule == After_Value && ((TimeNow.Ticks - change.Abstime.Ticks) / 10000L <= msTimeout))
+                        {
+                            return true;
+                        }
+                        else if (change.olderValue == Previous_Value && change.currentVaule != After_Value && ((TimeNow.Ticks - change.Abstime.Ticks) / 10000L <= msTimeout))
+                        {
+                            fail_value = change.currentVaule;
+                            return false;
+                        }
+                    }
+                }
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Check_Signal_ValueChange(uint CAN_ID)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+
+        public bool Check_FlexRay_Signal_ValueChange(string signalName, double Previous_Value, double After_Value, int msTimeout, ref double fail_value)
+        {
+            try
+            {
+                if (_FlexRay_SignalList.Count == 0)
+                {
+                    return false;
+                }
+                if (_FlexRay_SignalList.Any(p => p.Name == signalName))
+                {
+                    List<CANSignalChangeInfo> signalchaglist = new List<CANSignalChangeInfo>(_FlexRay_SignalList.First(p => p.Name == signalName).valueChangeList);
+                    DateTime TimeNow = DateTime.Now;
+                    foreach (var change in signalchaglist)
+                    {
+                        if (change.olderValue == Previous_Value && change.currentVaule == After_Value && ((TimeNow.Ticks - change.Abstime.Ticks) / 10000L <= msTimeout))
+                        {
+                            return true;
+                        }
+                        else if (change.olderValue == Previous_Value && change.currentVaule != After_Value && ((TimeNow.Ticks - change.Abstime.Ticks) / 10000L <= msTimeout))
+                        {
+                            fail_value = change.currentVaule;
+                            return false;
+                        }
+                    }
+                }
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Check_FlexRay_Signal_ValueChange(uint CAN_ID)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        public bool Check_FlexRay_Signal_ValueChange(string frameName, string signalName, double Previous_Value, double After_Value, int msTimeout, ref double fail_value)
+        {
+            try
+            {
+                if (FlexRay_Matrix.Any(p => p.Name == frameName))
+                {
+                    FlexRay_Message msg = FlexRay_Matrix.First(p => p.Name == frameName);
+                    if (msg.Signals.Any(p => p.Name == signalName))
+                    {
+                        List<CANSignalChangeInfo> signalchaglist = new List<CANSignalChangeInfo>(msg.Signals.First(p => p.Name == signalName).valueChangeList);
+                        DateTime TimeNow = DateTime.Now;
+                        foreach (var change in signalchaglist)
+                        {
+                            if (change.olderValue == Previous_Value && change.currentVaule == After_Value && ((TimeNow.Ticks - change.Abstime.Ticks) / 10000L <= msTimeout))
+                            {
+                                return true;
+                            }
+                            else if (change.olderValue == Previous_Value && change.currentVaule != After_Value && ((TimeNow.Ticks - change.Abstime.Ticks) / 10000L <= msTimeout))
+                            {
+                                fail_value = change.currentVaule;
+                                return false;
+                            }
+                        }
+                    }
+                }
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Check_FlexRay_Signal_ValueChange(uint CAN_ID)\n{0}\n{1}", ex.Message, ex.StackTrace));
+                return false;
+            }
+        }
+
+        public bool Send_FlexRay_DynamicMessage(uint Slot_ID, byte[] data, uint dlc)  //used for dynamic
+        {
+            if (_device_type == Device_Type.Sapa)
+            {
+                Log.Logger_Run(string.Format("[exception] Send_FlexRay_Message(string frameName, string sdata, uint dlc), SAPA not suport"));
+                return false;
+            }
+
+            FlexRay_Message msg = new FlexRay_Message();
+            msg.ID = Slot_ID;
+            msg.Data = new byte[dlc];
+            for (int i = 0; i < dlc; i++)
+            {
+                msg.Data[i] = data[i];
+            }
+            msg.OffSet = 0;
+            msg.Repetition = 1;
+            msg.TxRx = TxRxType.Tx;
+            msg.State = Message_State.Active;
+            bool state = _FlexRayDriver.Send(msg);
+            return state;
+        }
+
+        public bool InitStartupFrames(string erayFrameName, string coldFrameName)
+        {
+            if (FlexRay_Matrix.Count == 0)
+            {
+                return false;
+            }
+            FlexRay_Message eray_message = null;
+            FlexRay_Message cold_message = null;
+
+            if (FlexRay_Matrix.Any(p => p.Name == erayFrameName))
+            {
+                eray_message = FlexRay_Matrix.First(p => p.Name == erayFrameName);
+            }
+
+            if (FlexRay_Matrix.Any(p => p.Name == coldFrameName))
+            {
+                cold_message = FlexRay_Matrix.First(p => p.Name == coldFrameName);
+            }
+
+            if (eray_message != null && cold_message != null)
+            {
+                _FlexRayDriver.InitStartupFrames(eray_message, cold_message);
+                return true;
+            }
+
+            return false;
+        }        
+
+        void OnFlexMessageReceivedEventHandler(Fmessage Msg)
+        {
+            try
+            {
+                if (isInImportflbexProcess)
+                {
+                    return;
+                }
+
+                if (Msg.TxRx == TxRxType.Err)
+                {
+
+                }
+                else
+                {
+                    FlexRay_Message dbcMsg = null;
+                    uint slot_id = Msg.FrameID;
+                    int cyclecount = Msg.CycleCount;
+                    if (FlexRay_Matrix.Any(p => p.ID == slot_id && cyclecount % p.Repetition == p.OffSet))
+                    {
+                        dbcMsg = FlexRay_Matrix.First(p => p.ID == slot_id && cyclecount % p.Repetition == p.OffSet);
+                        if (dbcMsg.Need_Record)
+                        {
+                            Flexray_Message_sampleType temp_sampleMsg = new Flexray_Message_sampleType(DateTime.Now, Msg.TxRx, dbcMsg.Name, Msg.DLC, Msg.Data);
+                            dbcMsg.Recent_10_Messages.Add(temp_sampleMsg);
+                            if (dbcMsg.Recent_10_Messages.Count > 10)
+                                dbcMsg.Recent_10_Messages.RemoveAt(0);
+                        }
+
+
+                        dbcMsg.DLC = Msg.DLC;
+                        dbcMsg.Data = Msg.Data;
+                        dbcMsg.TxRx = Msg.TxRx;
+                        dbcMsg.CycleCount = Msg.CycleCount;
+                        dbcMsg.LastReceivedTimeMs = Msg.LastReceivedTimeMs;
+                        if (dbcMsg.Need_Record)
+                        {
+                            foreach (var sg in dbcMsg.Signals)
+                            {
+                                sg.valueRecordList.Add(new SignalValueRecord(sg.Value));
+                                if (sg.valueRecordList.Count > 500)
+                                { sg.valueRecordList.RemoveAt(0); }
+                            }
+                        }
+                    }
+
+                    if (ChannelFlexRaymsgNotify != null && dbcMsg != null)
+                    {
+                        ChannelFlexRaymsgNotify(dbcMsg);
+                    }
+                    
+					//comment it, Implemen all E2E function in app now
+					if (dbcMsg!=null && dbcMsg.E2E_Active && dbcMsg.State == Message_State.Active)
+                    {
+                        dbcMsg.Update_E2E();
+                        if (_device_type == Device_Type.Sapa)
+                            Send_FlexRay_Message(dbcMsg.Name, dbcMsg.Data, dbcMsg.DLC, 0);  //sapa should send in event
+                        else
+                            Send_FlexRay_Message(dbcMsg.Name, dbcMsg.Data, dbcMsg.DLC, 1);
+                    }					
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] OnFlexMessageReceivedEventHandler()\n{0}\n{1}", ex.Message, ex.StackTrace));
+            }
+        }
+
+        #endregion
+
+        #region CAN E2E protect
+        public void Set_E2E_Signal_Step1(string Checksum_signal_name, string RollingCounter_signal_name, int Strart_byte, int End_byte, uint id = 0)
+        {
+            if (_SignalList.Count > 0 && _SignalList.Any(p => p.Name == Checksum_signal_name))
+            {
+                CAN_Signal signal_checksum;
+                if (id > 0)
+                {
+                    signal_checksum = _SignalList.First(p => p.Name == Checksum_signal_name && p.CAN_ID_Ref == id);
+                }
+                else
+                {
+                    signal_checksum = _SignalList.First(p => p.Name == Checksum_signal_name);
+                }
+                signal_checksum.is_E2E_Checksum = true;
+                signal_checksum.E2E_StartByte = Strart_byte;
+                signal_checksum.E2E_EndByte = End_byte;
+            }
+            if (_SignalList.Count > 0 && _SignalList.Any(p => p.Name == RollingCounter_signal_name))
+            {
+                if (id > 0)
+                {
+                    _SignalList.First(p => p.Name == RollingCounter_signal_name && p.CAN_ID_Ref == id).is_E2E_RollingCount = true;
+                }
+                else { _SignalList.First(p => p.Name == RollingCounter_signal_name).is_E2E_RollingCount = true; }
+            }
+        }
+
+        public void Set_E2E_Signal_Step2(string Checksum_signal_name, byte DataID_HighByte, byte DataID_LowByte, uint id = 0)
+        {
+            if (_SignalList.Count > 0 && _SignalList.Any(p => p.Name == Checksum_signal_name))
+            {
+                CAN_Signal signal_checksum;
+                if (id > 0)
+                {
+                    signal_checksum = _SignalList.First(p => p.Name == Checksum_signal_name && p.CAN_ID_Ref == id);
+                }
+                else
+                {
+                    signal_checksum = _SignalList.First(p => p.Name == Checksum_signal_name);
+                }
+                signal_checksum.E2E_DataID_HByte = DataID_HighByte;
+                signal_checksum.E2E_DataID_LByte = DataID_LowByte;
+            }
+        }
+
+        public void Set_E2E_Signal_Step3(string Checksum_signal_name, int Calculate_Method, bool ReservedBit_Fill_1, uint id = 0)
+        {
+            if (_SignalList.Count > 0 && _SignalList.Any(p => p.Name == Checksum_signal_name))
+            {
+                CAN_Signal signal_checksum;
+                if (id > 0)
+                {
+                    signal_checksum = _SignalList.First(p => p.Name == Checksum_signal_name && p.CAN_ID_Ref == id);
+                }
+                else
+                {
+                    signal_checksum = _SignalList.First(p => p.Name == Checksum_signal_name);
+                }
+                signal_checksum.E2E_Method = Calculate_Method;
+                signal_checksum.is_E2E_ReservedBit_Fill_One = ReservedBit_Fill_1;
+            }
+        }
+
+        public void Active_E2E_Message(uint CAN_ID, bool isActive = true)
+        {
+            if (CAN_Matrix.Count > 0)
+            {
+                for (int i = 0; i < CAN_Matrix.Count; i++)
+                {
+                    if (CAN_Matrix[i].ID == CAN_ID)
+                    {
+                        CAN_Matrix[i].E2E_Active = isActive;
+                        return;
+                    }
+                }
+            }
+        }
+        #endregion
+
+        #region LIN E2E protect
+        public void Set_LIN_E2E_Signal_Step1(string Checksum_signal_name, string RollingCounter_signal_name, int Strart_byte, int End_byte, uint id = 0)
+        {
+            if (_LinSignalList.Count > 0 && _LinSignalList.Any(p => p.Name == Checksum_signal_name))
+            {
+                CAN_Signal signal_checksum;
+                if (id > 0)
+                {
+                    signal_checksum = _LinSignalList.First(p => p.Name == Checksum_signal_name && p.CAN_ID_Ref == id);
+                }
+                else
+                {
+                    signal_checksum = _LinSignalList.First(p => p.Name == Checksum_signal_name);
+                }
+                signal_checksum.UpdateBit = -1;
+                signal_checksum.is_E2E_Checksum = true;
+                signal_checksum.E2E_StartByte = Strart_byte;
+                signal_checksum.E2E_EndByte = End_byte;
+            }
+            if (_LinSignalList.Count > 0 && _LinSignalList.Any(p => p.Name == RollingCounter_signal_name))
+            {
+                if (id > 0)
+                {
+                    _LinSignalList.First(p => p.Name == RollingCounter_signal_name && p.CAN_ID_Ref == id).is_E2E_RollingCount = true;
+                    _LinSignalList.First(p => p.Name == RollingCounter_signal_name && p.CAN_ID_Ref == id).UpdateBit = -1;
+                }
+                else
+                {
+                    _LinSignalList.First(p => p.Name == RollingCounter_signal_name).is_E2E_RollingCount = true;
+                    _LinSignalList.First(p => p.Name == RollingCounter_signal_name).UpdateBit = -1;
+                }
+            }
+        }
+
+        public void Set_LIN_E2E_Signal_Step2(string Checksum_signal_name, byte DataID_HighByte, byte DataID_LowByte, uint id = 0)
+        {
+            if (_LinSignalList.Count > 0 && _LinSignalList.Any(p => p.Name == Checksum_signal_name))
+            {
+                CAN_Signal signal_checksum;
+                if (id > 0)
+                {
+                    signal_checksum = _LinSignalList.First(p => p.Name == Checksum_signal_name && p.CAN_ID_Ref == id);
+                }
+                else
+                {
+                    signal_checksum = _LinSignalList.First(p => p.Name == Checksum_signal_name);
+                }
+                signal_checksum.E2E_DataID_HByte = DataID_HighByte;
+                signal_checksum.E2E_DataID_LByte = DataID_LowByte;
+            }
+        }
+
+        public void Set_LIN_E2E_Signal_Step3(string Checksum_signal_name, int Calculate_Method, bool ReservedBit_Fill_1, uint id = 0)
+        {
+            if (_LinSignalList.Count > 0 && _LinSignalList.Any(p => p.Name == Checksum_signal_name))
+            {
+                CAN_Signal signal_checksum;
+                if (id > 0)
+                {
+                    signal_checksum = _LinSignalList.First(p => p.Name == Checksum_signal_name && p.CAN_ID_Ref == id);
+                }
+                else
+                {
+                    signal_checksum = _LinSignalList.First(p => p.Name == Checksum_signal_name);
+                }
+                signal_checksum.E2E_Method = Calculate_Method;
+                signal_checksum.is_E2E_ReservedBit_Fill_One = ReservedBit_Fill_1;
+            }
+        }
+
+        public void Active_LIN_E2E_Message(uint ID, bool isActive = true)
+        {
+            if (Lin_Matrix.Count > 0)
+            {
+                for (int i = 0; i < Lin_Matrix.Count; i++)
+                {
+                    if (Lin_Matrix[i].ID == ID)
+                    {
+                        Lin_Matrix[i].E2E_Active = isActive;
+                        return;
+                    }
+                }
+            }
+        }
+
+        #endregion
+
+        #region FR E2E protect
+        public void Set_FR_E2E_Signal_Step1(string Checksum_signal_name, string RollingCounter_signal_name, int Strart_byte, int End_byte, uint id = 0)
+        {
+            if (_FlexRay_SignalList.Count > 0 && _FlexRay_SignalList.Any(p => p.Name == Checksum_signal_name))
+            {
+                CAN_Signal signal_checksum;
+                if (id > 0)
+                {
+                    signal_checksum = _FlexRay_SignalList.First(p => p.Name == Checksum_signal_name && p.CAN_ID_Ref == id);
+                }
+                else
+                {
+                    signal_checksum = _FlexRay_SignalList.First(p => p.Name == Checksum_signal_name);
+                }
+                signal_checksum.UpdateBit = -1;
+                signal_checksum.is_E2E_Checksum = true;
+                signal_checksum.E2E_StartByte = Strart_byte;
+                signal_checksum.E2E_EndByte = End_byte;
+            }
+            if (_FlexRay_SignalList.Count > 0 && _FlexRay_SignalList.Any(p => p.Name == RollingCounter_signal_name))
+            {
+                if (id > 0)
+                {
+                    _FlexRay_SignalList.First(p => p.Name == RollingCounter_signal_name && p.CAN_ID_Ref == id).is_E2E_RollingCount = true;
+                    _FlexRay_SignalList.First(p => p.Name == RollingCounter_signal_name && p.CAN_ID_Ref == id).UpdateBit = -1;
+                }
+                else
+                {
+                    _FlexRay_SignalList.First(p => p.Name == RollingCounter_signal_name).is_E2E_RollingCount = true;
+                    _FlexRay_SignalList.First(p => p.Name == RollingCounter_signal_name).UpdateBit = -1;
+                }
+            }
+        }
+
+        public void Set_FR_E2E_Signal_Step2(string Checksum_signal_name, byte DataID_HighByte, byte DataID_LowByte, uint id = 0)
+        {
+            if (_FlexRay_SignalList.Count > 0 && _FlexRay_SignalList.Any(p => p.Name == Checksum_signal_name))
+            {
+                CAN_Signal signal_checksum;
+                if (id > 0)
+                {
+                    signal_checksum = _FlexRay_SignalList.First(p => p.Name == Checksum_signal_name && p.CAN_ID_Ref == id);
+                }
+                else
+                {
+                    signal_checksum = _FlexRay_SignalList.First(p => p.Name == Checksum_signal_name);
+                }
+                signal_checksum.E2E_DataID_HByte = DataID_HighByte;
+                signal_checksum.E2E_DataID_LByte = DataID_LowByte;
+            }
+        }
+
+        public void Set_FR_E2E_Signal_Step3(string Checksum_signal_name, int Calculate_Method, bool ReservedBit_Fill_1, uint id = 0)
+        {
+            if (_FlexRay_SignalList.Count > 0 && _FlexRay_SignalList.Any(p => p.Name == Checksum_signal_name))
+            {
+                CAN_Signal signal_checksum;
+                if (id > 0)
+                {
+                    signal_checksum = _FlexRay_SignalList.First(p => p.Name == Checksum_signal_name && p.CAN_ID_Ref == id);
+                }
+                else
+                {
+                    signal_checksum = _FlexRay_SignalList.First(p => p.Name == Checksum_signal_name);
+                }
+                signal_checksum.E2E_Method = Calculate_Method;
+                signal_checksum.is_E2E_ReservedBit_Fill_One = ReservedBit_Fill_1;
+            }
+        }
+
+        public void Active_FR_E2E_Message(string frameName, bool isActive = true)
+        {
+            if (FlexRay_Matrix.Count > 0)
+            {
+                for (int i = 0; i < FlexRay_Matrix.Count; i++)
+                {
+                    if (FlexRay_Matrix[i].Name == frameName)
+                    {
+                        FlexRay_Matrix[i].E2E_Active = isActive;
+                        return;
+                    }
+                }
+            }
+        }
+
+        #endregion
+
+        #region Value Generator Setting
+        public void set_Value_Generator(uint canid, string signalName, ValueGeneratorType type, List<string> settings)
+        {
+            if (_SignalList.Count > 0 && _SignalList.Any(p => p.Name == signalName && p.CAN_ID_Ref == canid))
+            {
+                CAN_Signal signal = _SignalList.First(p => p.Name == signalName && p.CAN_ID_Ref == canid);
+                CAN_Message msg = new CAN_Message();
+                Dictionary<string, string> settingsDict = new Dictionary<string, string>();
+                signal.value_generator_type = type;//设置类型               
+                signal.valueGenerator_Settings.Clear();
+                signal.valueGeneratorListIndex = 0;
+                //根据类型输入模板
+                switch (type)
+                {
+                    case ValueGeneratorType.None:
+                        return;
+                    case ValueGeneratorType.Toggle_Switch:
+                        signal.valueGenerator_Settings = new Dictionary<string, string>() { { "Level1", "0" }, { "Level2", "1" } };//unit:value(double)
+                        break;
+                    case ValueGeneratorType.Range_of_Value:
+                        signal.valueGenerator_Settings = new Dictionary<string, string>() { { "StepSize", "1" }, { "Hold", "1" }, { "Direction", "Rising" } };//unit:samples(uint),Direction:Rising,Falling,Alternate
+                        break;
+                    case ValueGeneratorType.Ramps_and_Pulses:
+                        signal.valueGenerator_Settings = new Dictionary<string, string>() { { "PreDelay", "1" }, { "Rise", "1" }, { "Hold", "1" }, { "Fall", "1" }, { "PostDelay", "1" }, { "Level1", "0" }, { "Level2", "1" } };//unit:samples
+                        break;
+                    case ValueGeneratorType.Random:
+                        signal.valueGenerator_Settings = new Dictionary<string, string>() { { "Min", "0" }, { "Max", "1" } };//unit:value
+                        break;
+                    default:
+                        return;
+                }
+                //输入值                
+                for (int j = 0; j < settings.Count; j++)
+                {
+                    signal.valueGenerator_Settings[signal.valueGenerator_Settings.Keys.ToList()[j]] = settings[j];
+                }
+
+                //当设置超出上下限，选用最大值和最小值代替原有值
+                for (int i = 0; i < signal.valueGenerator_Settings.Count; i++)
+                {
+                    string key = signal.valueGenerator_Settings.Keys.ToList()[i];
+                    if (signal.valueGenerator_Settings[key] == "Level1" || signal.valueGenerator_Settings[key] == "Level2" || signal.valueGenerator_Settings[key] == "Min" || signal.valueGenerator_Settings[key] == "Max")
+                    {
+                        if (double.Parse(settings[i]) > signal.Maximum)
+                        {
+                            signal.valueGenerator_Settings[key] = signal.Maximum.ToString();
+                        }
+                        else if (double.Parse(settings[i]) < signal.Minimum)
+                        {
+                            signal.valueGenerator_Settings[key] = signal.Minimum.ToString();
+                        }
+                        else { signal.valueGenerator_Settings[key] = settings[i]; }
+                    }
+                    else { signal.valueGenerator_Settings[key] = settings[i]; }
+                    i++;
+                }
+                //generate value                
+                msg.generateValue(signal);
+            }
+        }
+
+        public void active_Generator_Signal(uint canid, string signalName, bool isActive = true)
+        {
+            if (CAN_Matrix.Count > 0 && _SignalList.Count > 0 && _SignalList.Any(p => p.Name == signalName && p.CAN_ID_Ref == canid))
+            {
+
+                CAN_Message msg = CAN_Matrix.First(p => p.ID == canid);// 改成_CAN_Matrix
+                //CAN_Signal msg_signal=msg.Signals.First(p => p.Name == signalName);
+                CAN_Signal msg_signal = _SignalList.First(p => p.Name == signalName && p.CAN_ID_Ref == canid);
+
+                msg_signal.isValueGenerateActive = isActive;
+                if (isActive)
+                {
+                    //CAN_Matrix.First(p=>p.ID== canid).valueGenerator_Active=true;
+                    msg.valueGenerator_Active = true;
+                    //msg_signal.isValueGenerateActive=true;
+                }
+                else //否则遍历这条消息的信号中的使能都为false，则把消息的使能=false
+                {
+                    foreach (var signal in msg.Signals)
+                    {
+                        if (signal.isValueGenerateActive)
+                        {
+                            msg.valueGenerator_Active = true;
+                            return;
+                        }
+                        else { msg.valueGenerator_Active = false; }
+                    }
+
+                }
+            }
+        }
+        #endregion
+
+        #region internal functions to handle task
+        byte[] StringToByte(string hexString)
+        {
+            hexString = hexString.Replace(" ", "");
+            int byteLength = hexString.Length / 2;
+            byte[] returnBytes = new byte[byteLength];
+            try
+            {
+                for (int i = 0; i < byteLength; i++)
+                {
+                    returnBytes[i] = Convert.ToByte(hexString.Substring(i * 2, 2), 16);
+                }
+            }
+            catch (Exception ex)
+            {
+                returnBytes = new byte[byteLength];
+                Log.Logger_Run(string.Format("[exception] StringToByte(string hexString)\n{0}\n{1}", ex.Message, ex.StackTrace));
+            }
+            return returnBytes;
+        }
+        Message_Type ConvertToMsgType(uint ID, bool IsFD)
+        {
+            if ((ID & 0x1FFF0000) > 0)
+            {
+                if (!IsFD)
+                    return Message_Type.CAN_Extended;
+                else
+                    return Message_Type.CAN_FD_Extended;
+            }
+            else
+            {
+                if (!IsFD)
+                    return Message_Type.CAN_Standard;
+                else
+                    return Message_Type.CAN_FD_Standard;
+            }
+        }
+        bool IsConformed_InputBaudrate(CanBaudRate target_Baudrate)
+        {
+            if (CAN_Parameter.BusPhysicType == CANBus_PhysicType.singleWire)
+            {
+                if (target_Baudrate == CanBaudRate.Baud_33Kbit || target_Baudrate == CanBaudRate.Baud_83Kbit)
+                {
+                    CAN_Parameter.BaudRate = target_Baudrate;
+                }
+                else
+                { return false; }
+            }
+            else if (CAN_Parameter.BusPhysicType == CANBus_PhysicType.lowSpeed)
+            {
+                if (target_Baudrate == CanBaudRate.Baud_33Kbit || target_Baudrate == CanBaudRate.Baud_83Kbit ||
+                    target_Baudrate == CanBaudRate.Baud_100Kbit || target_Baudrate == CanBaudRate.Baud_125Kbit)
+                {
+                    CAN_Parameter.BaudRate = target_Baudrate;
+                }
+                else
+                { return false; }
+            }
+            else if (CAN_Parameter.BusPhysicType == CANBus_PhysicType.midSpeed)
+            {
+                if (target_Baudrate == CanBaudRate.Baud_250Kbit)
+                {
+                    CAN_Parameter.BaudRate = target_Baudrate;
+                }
+                else
+                { return false; }
+            }
+            else if (CAN_Parameter.BusPhysicType == CANBus_PhysicType.highSpeed)
+            {
+                if (target_Baudrate == CanBaudRate.Baud_250Kbit || target_Baudrate == CanBaudRate.Baud_500Kbit ||
+                    target_Baudrate == CanBaudRate.Baud_1Mbit)
+                {
+                    CAN_Parameter.BaudRate = target_Baudrate;
+                }
+                else
+                { return false; }
+            }
+            return true;
+        }
+        bool IsConformed_InputFDBaudrate(CanBaudRate target_arbitration_rate, CanBaudRate target_data_rate)
+        {
+            if ((UInt16)target_data_rate < 7)
+            {
+                return false;
+            }
+            if (CAN_Parameter.BusPhysicType == CANBus_PhysicType.midSpeed)
+            {
+                if (target_arbitration_rate == CanBaudRate.Baud_250Kbit)
+                {
+                    CAN_Parameter.Arbitration_rate = target_arbitration_rate;
+                }
+                else
+                { return false; }
+            }
+            else if (CAN_Parameter.BusPhysicType == CANBus_PhysicType.highSpeed)
+            {
+                if (target_arbitration_rate == CanBaudRate.Baud_250Kbit || target_arbitration_rate == CanBaudRate.Baud_500Kbit ||
+                    target_arbitration_rate == CanBaudRate.Baud_1Mbit)
+                {
+                    CAN_Parameter.Arbitration_rate = target_arbitration_rate;
+                    CAN_Parameter.Data_rate = target_data_rate;
+                }
+                else
+                { return false; }
+            }
+            return true;
+        }
+
+        void OnMessageReceivedEventHandler(Pmessage Msg)
+        {
+            try
+            {
+                if (isInImportdbcProcess)
+                {
+                    return;
+                }
+
+                if (Msg.TxRx == TxRxType.Err)
+                {
+                    if (Msg.Data == null)
+                    {
+                        Msg.Data = new byte[0];
+                    }
+                    CAN_Message msg = new CAN_Message(Msg.CANID, Msg.DLC, Msg.Data, Msg.TxRx, Msg.FDorNot);
+                    msg.ChannelName = FullName;
+                    msg.Error = Msg.Error;
+                    msg.LastReceivedTimeMs = (long)Msg.LastReceivedTimeMs;
+
+                    if (ChannelMessageNotify != null)
+                    {
+                        ChannelMessageNotify(msg);
+                    }
+                }
+                else
+                {
+                    if (_DBC_CANidList.Any(p => p == Msg.CANID))
+                    {
+                        //id in dbc is rx
+                        CAN_Message dbcMsg = CAN_Matrix.First(p => p.ID == Msg.CANID);
+                        CAN_Message_sampleType temp_sampleMsg = new CAN_Message_sampleType(DateTime.Now, Msg.TxRx, Msg.CANID, Msg.DLC, Msg.Data);
+                        dbcMsg.Recent_10_Messages.Add(temp_sampleMsg);
+                        if (dbcMsg.Recent_10_Messages.Count > 10)
+                            dbcMsg.Recent_10_Messages.RemoveAt(0);
+
+                        if (dbcMsg.FirstReceivedTimeMs == 0)
+                        {
+                            dbcMsg.FirstReceivedTimeMs = (long)Msg.LastReceivedTimeMs;
+                        }
+
+                        if (_DBC_RxCANidList.Any(p => p == Msg.CANID))//id in dbc is rx list
+                        {
+                            dbcMsg.DLC = Msg.DLC;
+                            dbcMsg.Data = Msg.Data;
+                            dbcMsg.ChannelName = FullName;
+                            dbcMsg.LastReceivedTimeMs = (long)Msg.LastReceivedTimeMs;
+
+                            foreach (var sg in dbcMsg.Signals)
+                            {
+                                sg.valueRecordList.Add(new SignalValueRecord(sg.Value));
+                                if (sg.valueRecordList.Count > 500)
+                                { sg.valueRecordList.RemoveAt(0); }
+                            }
+
+                            if (Msg.TxRx == TxRxType.Rx) //real message is rx
+                            {
+                                if (ChannelMessageNotify != null)
+                                {
+                                    ChannelMessageNotify(dbcMsg);
+                                }
+                            }
+                            else //real message is tx
+                            {
+                                CAN_Message msg = Copy_CANMessage(dbcMsg);
+                                msg.TxRx = TxRxType.Tx;
+                                if (ChannelMessageNotify != null)
+                                {
+                                    ChannelMessageNotify(msg);
+                                }
+                            }
+                        }
+                        //id in dbc is tx
+                        else
+                        {
+                            CAN_Message msg = Copy_CANMessage(dbcMsg);
+                            msg.DLC = Msg.DLC;
+                            msg.Data = Msg.Data;
+                            msg.TxRx = Msg.TxRx;
+                            msg.LastReceivedTimeMs = (long)Msg.LastReceivedTimeMs;
+
+                            //Log.Logger_Run(string.Format("Send callback {0}, {1}, {2}, {3}", msg.ID, msg.LastReceivedTimeMs, msg.Signals[0].Name, msg.Signals[1].Name));
+
+                            foreach (var sg in dbcMsg.Signals)
+                            {
+                                sg.valueRecordList.Add(new SignalValueRecord(sg.Value));
+                                if (sg.valueRecordList.Count > 500)
+                                { sg.valueRecordList.RemoveAt(0); }
+                            }
+
+                            if (ChannelMessageNotify != null)
+                            {
+                                ChannelMessageNotify(msg);
+                            }
+                        }
+                        //id is diag_res and req
+                        if (Msg.CANID == diagRes_ID)
+                        {
+                            if (!(Msg.Data[1] == 0x7F && Msg.Data[3] == 0x78) && Msg.Data[1] != 0x7E)
+                                receiveDiagMsg(Msg);
+                        }
+                    }
+                    else
+                    {
+                        CAN_Message msg = new CAN_Message(Msg.CANID, Msg.DLC, Msg.Data, Msg.TxRx, Msg.FDorNot);
+                        msg.ChannelName = FullName;
+                        msg.LastReceivedTimeMs = (long)Msg.LastReceivedTimeMs;
+                        //msg.ReceivedTimeStampNs = Msg.ReceivedTimeStampNs;
+                        if (CAN_Matrix_EXTRA.Any(p => p.ID == Msg.CANID))
+                        {
+                            CAN_Message dbcMsg = CAN_Matrix_EXTRA.First(p => p.ID == Msg.CANID);
+
+                            if (dbcMsg.FirstReceivedTimeMs == 0)
+                            {
+                                dbcMsg.FirstReceivedTimeMs = (long)Msg.LastReceivedTimeMs;
+                            }
+                        }                            
+
+                        if (ChannelMessageNotify != null)
+                        {
+                            ChannelMessageNotify(msg);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] OnMessageReceivedEventHandler()\n{0}\n{1}", ex.Message, ex.StackTrace));
+            }
+        }
+
+        void CyclicMessagesThread()
+        {
+            while (CAN_Thread_IsActive)
+            {
+                try
+                {
+                    if (isInImportdbcProcess)
+                    {
+                        Thread.Sleep(10);
+                    }
+                    else
+                    {
+                        int TimeSleep = 100;
+                        if (_CAN_TxCyclicList.Count > 0)
+                        {
+                            if (CANcyclePause == 1)
+                            {
+                                foreach (CAN_Message Target in _CAN_TxCyclicList)
+                                {
+                                    Target.State = Message_State.Paused;
+                                }
+                                CANcyclePause = 0;
+                                Thread.Sleep(10);
+                            }
+                            else if (CANcyclePause == 2)
+                            {
+                                foreach (CAN_Message Target in _CAN_TxCyclicList)
+                                {
+                                    Target.State = Message_State.Active;
+                                }
+                                CANcyclePause = 0;
+                                Thread.Sleep(10);
+                            }
+                            else if (CANcyclePause == 0)
+                            {
+                                long foreachStartTime = DateTime.Now.Ticks / 10000L;
+                                for (int i = 0; i < _CAN_TxCyclicList.Count; i++)
+                                {
+                                    CAN_Message msg = _CAN_TxCyclicList[i];
+                                    if (this.isFD == false && Convert.ToInt16(msg.Type) > 1)
+                                    {
+                                        return;
+                                    }
+                                    if (msg.State == Message_State.Active)
+                                    {
+                                        if (msg.LastSendTimeMs == 0)
+                                        {
+                                            Thread.Sleep(3);
+                                        }
+                                        long TimeNow = DateTime.Now.Ticks / 10000L;
+                                        long Elapsed = TimeNow - msg.LastSendTimeMs;
+                                        uint num3 = 0u;
+                                        if (Elapsed >= (long)(msg.CycleTime))
+                                        {
+                                            if (msg.rolling_Active)
+                                            {
+                                                msg.Update_Rolling();
+                                            }
+                                            if (msg.valueGenerator_Active)
+                                            {
+                                                msg.Update_GeneratorValue();
+                                            }
+                                            if (msg.E2E_Active)
+                                            {
+                                                msg.Update_E2E();
+                                            }
+                                            Pmessage temp_msg = new Pmessage(msg.ID, Convert.ToByte(msg.DLC), msg.Data, TxRxType.Tx, (Convert.ToInt16(msg.Type) > 1), 0, msg.isSingleWireHighVoltage);
+                                            bool ret = _driver.SendMessage(temp_msg);
+                                            msg.LastSendTimeMs = DateTime.Now.Ticks / 10000L;
+                                            num3 = (uint)msg.CycleTime;
+                                        }
+                                        TimeNow = DateTime.Now.Ticks / 10000L;
+                                        int NextTime = (int)(num3 - (uint)((int)TimeNow - (int)msg.LastSendTimeMs));
+                                        if (NextTime < TimeSleep)
+                                        {
+                                            TimeSleep = NextTime;
+                                        }
+                                    }
+                                }
+                                Thread.Sleep((TimeSleep > 0) ? TimeSleep : 1);
+                            }
+                        }
+                        else
+                        {
+                            Thread.Sleep(10);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log.Logger_Run(string.Format("catch exception: CyclicMessagesThread()\n{0}\n{1}", ex.Message, ex.StackTrace));
+                }
+            }
+        }
+
+        void PITSCyclicMessagesThread()
+        {
+            ObservableCollection<CAN_Message> messages = PITS_Matrix;
+            while (PITS_Thread_IsActive)
+            {
+                try
+                {
+                    int TimeSleep = 100;
+                    if (messages.Count > 0)
+                    {
+                        if (PITScyclePause == 1)
+                        {
+                            for (int i = 0; i < messages.Count; i++)
+                            {
+                                if (messages[i].TxRx == TxRxType.Tx)
+                                {
+                                    messages[i].State = Message_State.Paused;
+                                }
+                            }
+                            PITScyclePause = 0;
+                            Thread.Sleep(10);
+                        }
+                        else if (PITScyclePause == 2)
+                        {
+                            for (int i = 0; i < messages.Count; i++)
+                            {
+                                if (messages[i].TxRx == TxRxType.Tx)
+                                {
+                                    messages[i].State = Message_State.Active;
+                                }
+                            }
+                            PITScyclePause = 0;
+                            Thread.Sleep(10);
+                        }
+                        else if (PITScyclePause == 0)
+                        {
+                            for (int i = 0; i < messages.Count; i++)
+                            {
+                                CAN_Message tmessage = messages[i];
+                                long TimeNow = DateTime.Now.Ticks / 10000L;
+                                long Elapsed = TimeNow - tmessage.LastSendTimeMs;
+                                uint num3 = 0u;
+                                if (Elapsed >= (long)((ulong)tmessage.CycleTime))
+                                {
+                                    //Send
+                                    if (tmessage.State == Message_State.Active && (tmessage.Method != Tx_Method.Spontan) && tmessage.TxRx == TxRxType.Tx)
+                                    {
+                                        Pmessage temp_msg = new Pmessage(tmessage.ID, Convert.ToByte(tmessage.DLC), tmessage.Data, TxRxType.Tx, (Convert.ToInt16(tmessage.Type) > 1), 0, false);
+                                        if (!_driver.SendMessage(temp_msg))
+                                        {
+                                            //return;
+                                        }
+                                    }
+                                    tmessage.LastSendTimeMs = DateTime.Now.Ticks / 10000L;
+                                    num3 = (uint)tmessage.CycleTime;
+                                }
+                                TimeNow = DateTime.Now.Ticks / 10000L;
+                                int NextTime = (int)(num3 - (uint)((int)TimeNow - (int)tmessage.LastSendTimeMs));
+                                if (NextTime < TimeSleep)
+                                {
+                                    TimeSleep = NextTime;
+                                }
+                            }
+                            Thread.Sleep((TimeSleep > 0) ? TimeSleep : 1);
+                        }
+                    }
+                    else
+                    {
+                        Thread.Sleep(10);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log.Logger_Run(string.Format("[exception] PITSCyclicMessagesThread()\n{0}\n{1}", ex.Message, ex.StackTrace));
+                }
+            }
+        }
+        void Handler_swcWakeup(object sender, EventArgs e)
+        {
+            Send_CAN_message(0x100, 1, "00", true);
+        }
+
+        CAN_Message Copy_CANMessage(CAN_Message source_msg)
+        {
+            CAN_Message msgToReturn = new CAN_Message();
+            msgToReturn.Name = source_msg.Name;
+            msgToReturn.ECU = source_msg.ECU;
+            msgToReturn.ID = source_msg.ID;
+            msgToReturn.DLC = source_msg.DLC;
+            msgToReturn.Method = source_msg.Method;
+            msgToReturn.CycleTime = source_msg.CycleTime;
+            msgToReturn.Data = source_msg.Data;
+            msgToReturn.Error = source_msg.Error;
+            msgToReturn.LastReceivedTimeMs = source_msg.LastReceivedTimeMs;
+            //msgToReturn.ReceivedTimeStampNs = source_msg.ReceivedTimeStampNs;
+            msgToReturn.FirstReceivedTimeMs = source_msg.FirstReceivedTimeMs;
+
+            if (source_msg.Signals != null && source_msg.Signals.Count > 0)
+            {
+                foreach (var signal in source_msg.Signals)
+                {
+                    CAN_Signal new_signal = new CAN_Signal();
+                    new_signal.Name = signal.Name;
+                    new_signal.StartBit = signal.StartBit;
+                    new_signal.Length = signal.Length;
+                    new_signal.Factor = signal.Factor;
+                    new_signal.Offset = signal.Offset;
+                    new_signal.Init_Value = signal.Init_Value;
+                    new_signal.Minimum = signal.Minimum;
+                    new_signal.Maximum = signal.Maximum;
+                    new_signal.Max_Value = signal.Max_Value;
+                    new_signal.Min_Value = signal.Min_Value;
+                    new_signal.ByteOrder = signal.ByteOrder;
+                    new_signal.ValueType = signal.ValueType;
+                    new_signal.Value = signal.Value;
+                    msgToReturn.Signals.Add(new_signal);
+                }
+            }
+            return msgToReturn;
+        }
+        internal void ReConnect()
+        {
+            if (!_IsConnected)
+            { return; }
+            _driver.Initialize(CAN_Parameter);
+        }
+        bool ImportDBC_ThenSending(bool is1939 = false)
+        {
+            try
+            {
+                if (!File.Exists(DBCFilePath))
+                {
+                    return false;
+                }
+
+                isInImportdbcProcess = true;
+                Thread.Sleep(15);
+                ClearCANList();
+                is1939 = checkIs1939();
+                LoadDBCFile(is1939);
+
+                Set_ID_MessageList();
+                SendNetworkMessagePulse();
+                //SetLastSendTime();
+
+                isInImportdbcProcess = false;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("catch exception: ImportDBC_ThenSending()\n{0}\n{1}", ex.Message, ex.StackTrace));
+                ClearCANList();
+                isInImportdbcProcess = false;
+                return false;
+            }
+        }
+        bool ImportDBC_WithoutSending(bool is1939 = false)
+        {
+            try
+            {
+                if (!File.Exists(DBCFilePath))
+                {
+                    return false;
+                }
+
+                isInImportdbcProcess = true;
+                Thread.Sleep(15);
+                ClearCANList();
+                is1939 = checkIs1939();
+                LoadDBCFile(is1939);
+                Set_ID_MessageList();
+                BlockAllTxCyclicMessageInDBC();
+                isInImportdbcProcess = false;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("catch exception: ImportDBC_WithoutSending()\n{0}\n{1}", ex.Message, ex.StackTrace));
+                ClearCANList();
+                isInImportdbcProcess = false;
+                return false;
+            }
+        }
+        void ClearCANList()
+        {
+            CAN_Matrix.Clear();
+            _SignalList.Clear();
+            _CAN_TxCyclicList.Clear();
+            _DBC_CANidList.Clear();
+            _DBC_RxCANidList.Clear();
+            PITS_Matrix.Clear();
+        }
+        void ClearDiagList()
+        {
+            _Diag_Matrix.Clear();
+            _Diag_SignalList.Clear();
+        }
+
+        //check whether is1939 format from DBC content
+        //BA_ "Prio" BO_ 2156961792 4;  
+        //Prio symbol is ONLY for 1939 DBC
+        bool checkIs1939()
+        {
+            StreamReader streamReader = new StreamReader(DBCFilePath);
+            string Line = "";
+            while ((Line = streamReader.ReadLine()) != null)
+            {
+                string[] Temp = Line.Split(separator, StringSplitOptions.RemoveEmptyEntries);
+                if (Temp.Length > 2)
+                {
+                    if (Temp[0] == "BA_" && Temp[1].Replace("\"", "") == "Prio")  
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        void LoadDBCFile(bool is1939 = false)
+        {
+            int msgSendType_cyclic = -1;
+            int msgSendType_cyclicAndSpontan = -1;
+            int msgSendType_spontan = -1;
+            int defalut_sendtype = 0;//0:spontan 1:cyclic 2:cyclicandspontan
+            Dictionary<string, byte> source_id_Dict = new Dictionary<string, byte>();
+            Dictionary<uint, List<string>> transmitter_Dict = new Dictionary<uint, List<string>>();
+            Dictionary<uint, byte> prio_Dict = new Dictionary<uint, byte>();
+
+            StreamReader streamReader = new StreamReader(DBCFilePath);
+            string Line = "";
+            CAN_Message Temp_Message = new CAN_Message();
+            if (is1939)
+            {
+                //get source_id_Dict and transmitter_Dict first
+                while ((Line = streamReader.ReadLine()) != null)
+                {
+                    string[] Temp = Line.Split(separator, StringSplitOptions.RemoveEmptyEntries);
+                    if (Temp.Length > 0)
+                    {
+                        if (Temp[0] == "BO_TX_BU_" && Temp.Length == 3)
+                        {
+                            uint id = uint.Parse(Temp[1]);
+                            List<string> ECU_names = Temp[2].Split(';')[0].Split(',').ToList();
+                            transmitter_Dict.Add(id, ECU_names);
+                        }
+                        else if (Temp[0] == "BA_" && Temp.Length > 1 && Temp[1].Replace("\"", "") == "SourceId")
+                        {
+                            string[] Temp1 = Line.Split(new char[] { '"' }, StringSplitOptions.RemoveEmptyEntries);
+                            string[] Temp2 = Temp1[2].Split(' ');
+                            string ECUname = Temp2[2].Trim();
+                            byte sourceid = byte.Parse(Temp2[3].Split(';')[0]);
+
+                            if (!source_id_Dict.ContainsKey(ECUname))
+                            {
+                                source_id_Dict.Add(ECUname, sourceid);
+                            }
+                        }
+                        else if (Temp[0] == "BA_" && Temp.Length > 1 && Temp[1].Replace("\"", "") == "Prio")
+                        {
+                            string[] Temp1 = Line.Split(new char[] { '"' }, StringSplitOptions.RemoveEmptyEntries);
+                            string[] Temp2 = Temp1[2].Split(' ');
+                            uint id = uint.Parse(Temp2[2].Trim());
+                            byte prioID = byte.Parse(Temp2[3].Split(';')[0]);
+
+                            if (!prio_Dict.ContainsKey(id) && prioID != 0)
+                            {
+                                switch (prioID)
+                                {
+                                    case 3:
+                                        prio_Dict.Add(id, 0xC);
+                                        break;
+                                    case 4:
+                                        prio_Dict.Add(id, 0x10);
+                                        break;
+                                    default:
+                                        prio_Dict.Add(id, prioID);
+                                        break;
+                                }
+
+                            }
+                        }
+                    }
+                }
+
+                streamReader = new StreamReader(DBCFilePath);
+                uint canid = 0;
+                string msgname = "";
+                uint dlc = 0;
+                string ECU = "";
+                List<string> ECUs = new List<string>();
+                while ((Line = streamReader.ReadLine()) != null)
+                {
+                    string[] Temp = Line.Split(separator, StringSplitOptions.RemoveEmptyEntries);
+                    if (Temp.Length > 0)
+                    {
+                        //1939方式更新ID
+                        if (Temp[0] == "BO_")
+                        {
+                            canid = Convert.ToUInt32(Temp[1]);
+                            msgname = Temp[2];
+                            dlc = Convert.ToUInt32(Temp[3]);
+                            ECU = Temp[4];
+                        }
+                        //如果ECU ID在transmitter列表，直接获取ECU列表，如果不在，则是唯一ECU，如果是11位ID，也只取一个ECU
+                        if (transmitter_Dict.Any(p => p.Key == canid) && (canid & 0xFFFFF000) != 0)
+                        {
+                            ECUs = transmitter_Dict.First(p => p.Key == canid).Value;
+                        }
+                        else
+                        {
+                            ECUs.Clear();
+                            if (ECU != "")
+                            {
+                                ECUs.Add(ECU);
+                            }
+                        }
+                        foreach (var ecu in ECUs)
+                        {
+                            Temp_Message = new CAN_Message(canid, msgname, dlc, ecu);
+                            if (Temp_Message.ECU.ToLower() == _benchName.ToLower())
+                            {
+                                Temp_Message.TxRx = TxRxType.Rx;
+                            }
+                            else
+                            {
+                                Temp_Message.TxRx = TxRxType.Tx;
+                            }
+                            Temp_Message.IsLoadBydbc = true;
+                            //update ID
+                            if (source_id_Dict.Any(p => p.Key == ecu) && prio_Dict.Any(p => p.Key == canid))
+                            {
+                                byte sourceID = source_id_Dict.First(p => p.Key == ecu).Value;
+                                byte prioID = prio_Dict.First(p => p.Key == canid).Value;
+                                Temp_Message.ID = (Temp_Message.ID & mask) + sourceID + (uint)prioID * 0x1000000;
+                                Temp_Message.ECU = ecu;
+                                if (!CAN_Matrix.Any(p => p.ID == Temp_Message.ID))
+                                {
+                                    CAN_Matrix.Add(Temp_Message);
+                                }
+                            }
+                            //Add 11bit id msg
+                            else if ((canid & 0xFFFFF000) == 0)
+                            {
+                                Temp_Message.ID = canid;
+                                Temp_Message.ECU = ecu;
+                                if (!CAN_Matrix.Any(p => p.ID == Temp_Message.ID))
+                                {
+                                    CAN_Matrix.Add(Temp_Message);
+                                }
+                            }
+
+                            //get signal info
+                            if (Temp[0] == "SG_")
+                            {
+                                //skip invalid message and signals belongs to it
+                                if (Temp_Message.Name == "VECTOR__INDEPENDENT_SIG_MSG")
+                                {
+                                    continue;
+                                }
+                                char[] separator2 = new char[]
+                                    {
+                            '|',
+                            '@',
+                                    };
+                                string[] BasicInfo = Temp[2].Split(separator2);
+                                CAN_Signal nSignal = new CAN_Signal()
+                                {
+                                    Name = Temp[1],
+                                    StartBit = Convert.ToInt32(BasicInfo[0]),
+                                    Length = Convert.ToInt32(BasicInfo[1]),
+                                    ByteOrder = BasicInfo[2][0] == '0' ? 0 : 1,
+                                    ValueType = BasicInfo[2][1] == '+' ? 1 : 0,
+                                    Factor = Convert.ToDouble((Temp[3].Split(','))[0]),
+                                    Offset = Convert.ToDouble((Temp[3].Split(','))[1]),
+                                    Minimum = Convert.ToDouble((Temp[4].Split('|'))[0]),
+                                    Maximum = Convert.ToDouble((Temp[4].Split('|'))[1]),
+                                    Unit = Temp[5].Replace("\"", ""),
+                                    Min_Value = Convert.ToDouble((Temp[3].Split(','))[1]),
+                                };
+                                nSignal.Max_Value = (((ulong)1 << (nSignal.Length - 1)) * 2 - 1) * nSignal.Factor + nSignal.Offset;
+                                nSignal.CAN_ID_Ref = Temp_Message.ID;
+                                nSignal.name_ref = nSignal.Name;
+                                if (!_SignalList.Any(p => p.CAN_ID_Ref == Temp_Message.ID && p.Name == nSignal.Name) && CAN_Matrix.Count != 0 && CAN_Matrix.Any(p => p.ID == Temp_Message.ID))
+                                {
+                                    CAN_Matrix.Find(p => p.ID == Temp_Message.ID).Signals.Add(nSignal);
+                                    //Temp_Message.Signals.Add(nSignal);
+                                    _SignalList.Add(nSignal);
+                                }
+
+                            }
+
+                        }
+
+                        if (Temp[0] == "BA_DEF_" && Temp.Length == 5)
+                        {
+                            if (Temp[2].Replace("\"", "") == "GenMsgSendType" && Temp[3] == "ENUM")
+                            {
+                                if (Temp[4] != "")
+                                {
+                                    string[] msg_types = Temp[4].Replace("\"", "").Replace(";", "").Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+                                    if (msg_types.Any(p => p.ToLower() == "cyclic" || p.ToLower() == "cyclicx"))
+                                        msgSendType_cyclic = Array.IndexOf(msg_types, msg_types.First(p => p.ToLower() == "cyclic" || p.ToLower() == "cyclicx"));
+                                    if (msg_types.Any(p => p.ToLower() == "cyclicandspontan" || p.ToLower() == "cyclicandspontanx"))
+                                        msgSendType_cyclicAndSpontan = Array.IndexOf(msg_types, msg_types.First(p => p.ToLower() == "cyclicandspontan" || p.ToLower() == "cyclicandspontanx"));
+                                    if (msg_types.Any(p => p.ToLower() == "spontan" || p.ToLower() == "spontanx" || p.ToLower() == "event" || p.ToLower() == "nomsgsendtype"))
+                                        msgSendType_spontan = Array.IndexOf(msg_types, msg_types.First(p => p.ToLower() == "spontan" || p.ToLower() == "spontanx" || p.ToLower() == "event" || p.ToLower() == "nomsgsendtype"));
+                                }
+                            }
+                        }
+
+                        else if (Temp[0] == "BA_DEF_DEF_" && Temp.Length == 3)
+                        {
+                            if (Temp[1].Replace("\"", "") == "GenMsgSendType")
+                            {
+                                if (Temp[2] != "")
+                                {
+                                    switch (Temp[2].Replace("\"", "").Replace(";", "").ToLower())
+                                    {
+                                        case "cyclic":
+                                        case "cyclicx":
+                                            defalut_sendtype = 1;
+                                            break;
+                                        case "cyclicandspontan":
+                                        case "cyclicandspontanx":
+                                            defalut_sendtype = 2;
+                                            break;
+                                        case "spontan":
+                                        case "spontanx":
+                                        case "event":
+                                        case "nomsgsendtype":
+                                        case "notused":
+                                            defalut_sendtype = 0;
+                                            break;
+                                        default:
+                                            defalut_sendtype = 0;
+                                            break;
+                                    }
+                                }
+                            }
+                            if (defalut_sendtype == 1)
+                            {
+                                foreach (var target in CAN_Matrix)
+                                {
+                                    target.Method = Tx_Method.Cyclic;
+                                }
+                            }
+                            else if (defalut_sendtype == 2)
+                            {
+                                foreach (var target in CAN_Matrix)
+                                {
+                                    target.Method = Tx_Method.CyclicAndSpontan;
+                                }
+                            }
+                            else if (defalut_sendtype == 0)
+                            {
+                                foreach (var target in CAN_Matrix)
+                                {
+                                    target.Method = Tx_Method.Spontan;
+                                }
+                            }
+                        }
+
+                        else if (Temp[0] == "BA_" && Temp.Length > 1)
+                        {
+                            if (Temp[1].Replace("\"", "") == "GenMsgCycleTime")
+                            {
+                                if (CAN_Matrix.Any(p => maskedID(p.ID) == maskedID(Convert.ToUInt32(Temp[3]))))
+                                {
+                                    var msgs = CAN_Matrix.FindAll(p => maskedID(p.ID) == maskedID(Convert.ToUInt32(Temp[3])));
+                                    foreach (var Message in msgs)
+                                    {
+                                        Message.CycleTime = Convert.ToUInt32(Temp[4].Replace(";", ""));
+                                    }
+                                }
+
+                            }
+                            else if (Temp[1].Replace("\"", "") == "GenMsgSendType")
+                            {
+                                if (CAN_Matrix.Any(p => maskedID(p.ID) == maskedID(Convert.ToUInt32(Temp[3]))))
+                                {
+                                    var msgs = CAN_Matrix.FindAll(p => maskedID(p.ID) == maskedID(Convert.ToUInt32(Temp[3])));
+                                    foreach (var Message in msgs)
+                                    {
+                                        if (Convert.ToInt32(Temp[4].Replace(";", "")) == msgSendType_cyclic)
+                                            Message.Method = Tx_Method.Cyclic;
+                                        else if (Convert.ToInt32(Temp[4].Replace(";", "")) == msgSendType_cyclicAndSpontan)
+                                            Message.Method = Tx_Method.CyclicAndSpontan;
+                                        else if (Convert.ToInt32(Temp[4].Replace(";", "")) == msgSendType_spontan)
+                                            Message.Method = Tx_Method.Spontan;
+                                    }
+                                }
+
+                            }
+                            else if (Temp[1].Replace("\"", "") == "VFrameFormat")
+                            {
+                                if (CAN_Matrix.Any(p => maskedID(p.ID) == maskedID(Convert.ToUInt32(Temp[3]))))
+                                {
+                                    var msgs = CAN_Matrix.FindAll(p => maskedID(p.ID) == maskedID(Convert.ToUInt32(Temp[3])));
+                                    foreach (var Message in msgs)
+                                    {
+                                        switch (Convert.ToUInt32(Temp[4].Replace(";", "")))
+                                        {
+                                            case 0:
+                                                Message.Type = Message_Type.CAN_Standard; break;
+                                            case 1:
+                                                Message.Type = Message_Type.CAN_Extended; break;
+                                            case 14:
+                                                Message.Type = Message_Type.CAN_FD_Standard; break;
+                                            case 15:
+                                                Message.Type = Message_Type.CAN_FD_Extended; break;
+                                            default:
+                                                Message.Type = Message_Type.CAN_Standard; break;
+                                        }
+
+
+                                    }
+                                }
+                            }
+                            else if (Temp[1].Replace("\"", "") == "NmAsrMessage")
+                            {
+                                if (CAN_Matrix.Any(p => maskedID(p.ID) == maskedID(Convert.ToUInt32(Temp[3]))))
+                                {
+                                    var msgs = CAN_Matrix.FindAll(p => maskedID(p.ID) == maskedID(Convert.ToUInt32(Temp[3])));
+                                    foreach (var Message in msgs)
+                                    {
+                                        switch (Convert.ToUInt32(Temp[4].Replace(";", "")))
+                                        {
+                                            case 0:
+                                                Message.IsNMAsrMesssage = false; break;
+                                            case 1:
+                                                Message.IsNMAsrMesssage = true; break;
+                                            default:
+                                                Message.IsNMAsrMesssage = false; break;
+                                        }
+
+                                    }
+                                }
+
+                            }
+                            else if (Temp[1].Replace("\"", "") == "GenSigStartValue")
+                            {
+                                if (CAN_Matrix.Any(p => maskedID(p.ID) == maskedID(Convert.ToUInt32(Temp[3]))))
+                                {
+                                    var msgs = CAN_Matrix.FindAll(p => maskedID(p.ID) == maskedID(Convert.ToUInt32(Temp[3])));
+                                    foreach (var Message in msgs)
+                                    {
+                                        foreach (var Signal in Message.Signals)
+                                        {
+                                            if (Signal.Name == Temp[4])
+                                            {
+                                                Signal.Init_Value = Convert.ToDouble(Temp[5].Replace(";", ""));//raw value
+                                                Message.Set_Signal_RawValue(Signal, (ulong)Signal.Init_Value);
+                                                Signal.Init_Value = Signal.Init_Value * Signal.Factor + Signal.Offset;//physical value
+                                                break;
+                                            }
+                                        }
+
+                                    }
+                                }
+
+                            }
+                            else if (Temp[1].Replace("\"", "") == "SignalLongName")
+                            {
+                                if (CAN_Matrix.Any(p => maskedID(p.ID) == maskedID(Convert.ToUInt32(Temp[3]))))
+                                {
+                                    var msgs = CAN_Matrix.FindAll(p => maskedID(p.ID) == maskedID(Convert.ToUInt32(Temp[3])));
+                                    foreach (var Message in msgs)
+                                    {
+                                        foreach (var Signal in Message.Signals)
+                                        {
+                                            if (Signal.Name == Temp[4])
+                                            {
+                                                string[] Temp1 = Line.Split(new char[] { '"' }, StringSplitOptions.RemoveEmptyEntries);
+                                                Signal.longName = Temp1[3];
+                                                break;
+                                            }
+                                        }
+
+                                    }
+                                }
+
+
+                            }
+
+                        }
+
+                        //get signal valuetable
+                        else if (Temp[0] == "VAL_")
+                        {
+                            if (Temp.Count() <= 1)
+                            { continue; }//跳过第一个空VAL
+
+                            string[] Temp1 = Line.Split(new char[] { '"' }, StringSplitOptions.RemoveEmptyEntries);
+                            Temp1 = Temp1.Take(Temp1.Length - 1).ToArray();//delete last ';'
+
+                            string[] Temp2 = Temp1[0].Trim().Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);//temp1的第一个item拆分
+
+                            var can_id = (UInt32)(Convert.ToInt64(Temp2[1].Trim()));
+                            var signal_name = Temp2[2].Trim();
+
+                            if (_SignalList.Any(p => p.Name == signal_name && maskedID(p.CAN_ID_Ref) == maskedID(can_id)))
+                            {
+                                foreach (var msg in CAN_Matrix)
+                                {
+                                    if (maskedID(msg.ID) == maskedID(can_id) && msg.Signals.Any(p => p.Name == signal_name))
+                                    {
+                                        List<string> valueTable = new List<string>();
+
+                                        for (int i = 1; i < Temp1.Length; i = i + 2)
+                                        {
+                                            //Log.Logger_Run("tmp: {0}", Temp[i]);
+                                            if (i == 1)
+                                            {
+                                                string first = "0x" + Convert.ToInt64(Temp2.Last()).ToString("X") + "=" + Temp1[i].Trim();
+                                                valueTable.Add(first);
+                                            }
+                                            else
+                                            {
+                                                string second = "0x" + Convert.ToInt64(Temp1[i - 1].Trim()).ToString("X") + "=" + Temp1[i].Trim();
+                                                valueTable.Add(second);
+                                            }
+
+                                        }
+
+                                        //valueTable.Sort();
+                                        msg.Signals.First(p => p.Name == signal_name).valueTable = valueTable;
+                                    }
+                                }
+
+
+
+                            }
+
+                        }
+
+
+                    }
+                }
+            }
+            else //not 1939
+            {
+                while ((Line = streamReader.ReadLine()) != null)
+                {
+                    string[] Temp = Line.Split(separator, StringSplitOptions.RemoveEmptyEntries);
+                    if (Temp.Length > 0)
+                    {
+                        if (Temp[0] == "BO_")
+                        {
+                            Temp_Message = new CAN_Message(Convert.ToUInt32(Temp[1]), Temp[2], Convert.ToUInt32(Temp[3]), Temp[4]);
+                            if (Temp_Message.ECU.ToLower() == _benchName.ToLower())
+                            {
+                                Temp_Message.TxRx = TxRxType.Rx;
+                            }
+                            else
+                            {
+                                Temp_Message.TxRx = TxRxType.Tx;
+                            }
+                            Temp_Message.IsLoadBydbc = true;
+                            CAN_Matrix.Add(Temp_Message);
+                        }
+
+                        else if (Temp[0] == "BA_DEF_" && Temp.Length == 5)
+                        {
+                            if (Temp[2].Replace("\"", "") == "GenMsgSendType" && Temp[3] == "ENUM")
+                            {
+                                if (Temp[4] != "")
+                                {
+                                    string[] msg_types = Temp[4].Replace("\"", "").Replace(";", "").Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+                                    if (msg_types.Any(p => p.ToLower() == "cyclic" || p.ToLower() == "cyclicx"))
+                                        msgSendType_cyclic = Array.IndexOf(msg_types, msg_types.First(p => p.ToLower() == "cyclic" || p.ToLower() == "cyclicx"));
+                                    if (msg_types.Any(p => p.ToLower() == "cyclicandspontan" || p.ToLower() == "cyclicandspontanx"))
+                                        msgSendType_cyclicAndSpontan = Array.IndexOf(msg_types, msg_types.First(p => p.ToLower() == "cyclicandspontan" || p.ToLower() == "cyclicandspontanx"));
+                                    if (msg_types.Any(p => p.ToLower() == "spontan" || p.ToLower() == "spontanx" || p.ToLower() == "event" || p.ToLower() == "nomsgsendtype"))
+                                        msgSendType_spontan = Array.IndexOf(msg_types, msg_types.First(p => p.ToLower() == "spontan" || p.ToLower() == "spontanx" || p.ToLower() == "event" || p.ToLower() == "nomsgsendtype"));
+                                }
+                            }
+                        }
+
+                        else if (Temp[0] == "BA_DEF_DEF_" && Temp.Length == 3)
+                        {
+                            if (Temp[1].Replace("\"", "") == "GenMsgSendType")
+                            {
+                                if (Temp[2] != "")
+                                {
+                                    switch (Temp[2].Replace("\"", "").Replace(";", "").ToLower())
+                                    {
+                                        case "cyclic":
+                                        case "cyclicx":
+                                            defalut_sendtype = 1;
+                                            break;
+                                        case "cyclicandspontan":
+                                        case "cyclicandspontanx":
+                                            defalut_sendtype = 2;
+                                            break;
+                                        case "spontan":
+                                        case "spontanx":
+                                        case "event":
+                                        case "nomsgsendtype":
+                                        case "notused":
+                                            defalut_sendtype = 0;
+                                            break;
+                                        default:
+                                            defalut_sendtype = 0;
+                                            break;
+                                    }
+                                }
+                            }
+                            if (defalut_sendtype == 1)
+                            {
+                                foreach (var target in CAN_Matrix)
+                                {
+                                    target.Method = Tx_Method.Cyclic;
+                                }
+                            }
+                            else if (defalut_sendtype == 2)
+                            {
+                                foreach (var target in CAN_Matrix)
+                                {
+                                    target.Method = Tx_Method.CyclicAndSpontan;
+                                }
+                            }
+                            else if (defalut_sendtype == 0)
+                            {
+                                foreach (var target in CAN_Matrix)
+                                {
+                                    target.Method = Tx_Method.Spontan;
+                                }
+                            }
+                        }
+
+                        else if (Temp[0] == "BA_" && Temp.Length > 1)
+                        {
+                            if (Temp[1].Replace("\"", "") == "GenMsgCycleTime")
+                            {
+                                foreach (var Message in CAN_Matrix)
+                                {
+                                    if (Message.ID == Convert.ToUInt32(Temp[3]))
+                                    {
+										string d_value = Temp[4].Replace(";", "");
+                                        Message.CycleTime = Convert.ToUInt32(Convert.ToDouble(d_value)); //updated in 2023/03/06                                        break;
+										break;
+									}
+                                }
+                            }
+                            else if (Temp[1].Replace("\"", "") == "GenMsgSendType")
+                            {
+                                foreach (var Message in CAN_Matrix)
+                                {
+                                    if (Message.ID == Convert.ToUInt32(Temp[3]))
+                                    {
+                                        if (Convert.ToInt32(Temp[4].Replace(";", "")) == msgSendType_cyclic)
+                                            Message.Method = Tx_Method.Cyclic;
+                                        else if (Convert.ToInt32(Temp[4].Replace(";", "")) == msgSendType_cyclicAndSpontan)
+                                            Message.Method = Tx_Method.CyclicAndSpontan;
+                                        else if (Convert.ToInt32(Temp[4].Replace(";", "")) == msgSendType_spontan)
+                                            Message.Method = Tx_Method.Spontan;
+                                        break;
+                                    }
+
+                                }
+                            }
+                            else if (Temp[1].Replace("\"", "") == "VFrameFormat")
+                            {
+                                foreach (var Message in CAN_Matrix)
+                                {
+                                    if (Message.ID == Convert.ToUInt32(Temp[3]))
+                                    {
+                                        switch (Convert.ToUInt32(Temp[4].Replace(";", "")))
+                                        {
+                                            case 0:
+                                                Message.Type = Message_Type.CAN_Standard; break;
+                                            case 1:
+                                                Message.Type = Message_Type.CAN_Extended; break;
+                                            case 14:
+                                                Message.Type = Message_Type.CAN_FD_Standard; break;
+                                            case 15:
+                                                Message.Type = Message_Type.CAN_FD_Extended; break;
+                                            default:
+                                                Message.Type = Message_Type.CAN_Standard; break;
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                            else if (Temp[1].Replace("\"", "") == "NmAsrMessage")
+                            {
+                                foreach (var Message in CAN_Matrix)
+                                {
+                                    if (Message.ID == Convert.ToUInt32(Temp[3]))
+                                    {
+                                        switch (Convert.ToUInt32(Temp[4].Replace(";", "")))
+                                        {
+                                            case 0:
+                                                Message.IsNMAsrMesssage = false; break;
+                                            case 1:
+                                                Message.IsNMAsrMesssage = true; break;
+                                            default:
+                                                Message.IsNMAsrMesssage = false; break;
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                            else if (Temp[1].Replace("\"", "") == "GenSigStartValue")
+                            {
+                                foreach (var Message in CAN_Matrix)
+                                {
+                                    if (Message.ID == Convert.ToUInt32(Temp[3]))
+                                    {
+                                        foreach (var Signal in Message.Signals)
+                                        {
+                                            if (Signal.Name == Temp[4])
+                                            {
+                                                Signal.Init_Value = Convert.ToDouble(Temp[5].Replace(";", ""));//raw value
+                                                Message.Set_Signal_RawValue(Signal, (ulong)Signal.Init_Value);
+                                                Signal.Init_Value = Signal.Init_Value * Signal.Factor + Signal.Offset;//physical value
+                                                break;
+                                            }
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                            else if (Temp[1].Replace("\"", "") == "SignalLongName")
+                            {
+                                foreach (var Message in CAN_Matrix)
+                                {
+                                    if (Message.ID == Convert.ToUInt32(Temp[3]))
+                                    {
+                                        foreach (var Signal in Message.Signals)
+                                        {
+                                            if (Signal.Name == Temp[4])
+                                            {
+                                                string[] Temp1 = Line.Split(new char[] { '"' }, StringSplitOptions.RemoveEmptyEntries);
+                                                Signal.longName = Temp1[3];
+                                                break;
+                                            }
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        //get signal info
+                        else if (Temp[0] == "SG_")
+                        {
+                            //skip invalid message and signals belongs to it
+                            if (Temp_Message.Name == "VECTOR__INDEPENDENT_SIG_MSG")
+                            {
+                                continue;
+                            }
+                            char[] separator2 = new char[]
+                                {
+                            '|',
+                            '@',
+                                };
+                            string[] BasicInfo = Temp[2].Split(separator2);
+                            CAN_Signal nSignal = new CAN_Signal()
+                            {
+                                Name = Temp[1],
+                                StartBit = Convert.ToInt32(BasicInfo[0]),
+                                Length = Convert.ToInt32(BasicInfo[1]),
+                                ByteOrder = BasicInfo[2][0] == '0' ? 0 : 1,
+                                ValueType = BasicInfo[2][1] == '+' ? 1 : 0,
+                                Factor = Convert.ToDouble((Temp[3].Split(','))[0]),
+                                Offset = Convert.ToDouble((Temp[3].Split(','))[1]),
+                                Minimum = Convert.ToDouble((Temp[4].Split('|'))[0]),
+                                Maximum = Convert.ToDouble((Temp[4].Split('|'))[1]),
+                                Unit = Temp[5].Replace("\"", ""),
+                                Min_Value = Convert.ToDouble((Temp[3].Split(','))[1]),
+                            };
+                            nSignal.Max_Value = (((ulong)1 << (nSignal.Length - 1)) * 2 - 1) * nSignal.Factor + nSignal.Offset;
+                            nSignal.CAN_ID_Ref = Temp_Message.ID;
+                            nSignal.name_ref = nSignal.Name;
+                            Temp_Message.Signals.Add(nSignal);
+                            _SignalList.Add(nSignal);
+                        }
+                        //get signal valuetable
+                        else if (Temp[0] == "VAL_")
+                        {
+                            if (Temp.Count() <= 1)
+                            { continue; }//跳过第一个空VAL
+
+                            string[] Temp1 = Line.Split(new char[] { '"' }, StringSplitOptions.RemoveEmptyEntries);
+                            Temp1 = Temp1.Take(Temp1.Length - 1).ToArray();//delete last ';'
+
+                            string[] Temp2 = Temp1[0].Trim().Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);//temp1的第一个item拆分
+
+                            var can_id = (UInt32)(Convert.ToInt64(Temp2[1].Trim()));
+                            var signal_name = Temp2[2].Trim();
+
+
+                            if (_SignalList.Any(p => p.Name == signal_name && p.CAN_ID_Ref == can_id))
+                            {
+                                CAN_Signal signal = _SignalList.Find(p => p.Name == signal_name && p.CAN_ID_Ref == can_id);
+
+                                List<string> valueTable = new List<string>();
+
+                                for (int i = 1; i < Temp1.Length; i = i + 2)
+                                {
+                                    //Log.Logger_Run("tmp: {0}", Temp[i]);
+                                    if (i == 1)
+                                    {
+                                        string first = "0x" + Convert.ToInt64(Temp2.Last()).ToString("X") + "=" + Temp1[i].Trim();
+                                        valueTable.Add(first);
+                                    }
+                                    else
+                                    {
+                                        string second = "0x" + Convert.ToInt64(Temp1[i - 1].Trim()).ToString("X") + "=" + Temp1[i].Trim();
+                                        valueTable.Add(second);
+                                    }
+
+                                }
+
+                                //valueTable.Sort();
+                                signal.valueTable = valueTable;
+                            }
+
+                        }
+                    }
+                }
+
+            }
+
+
+            if (_SignalList.Any(p => p.Name == "JmpStrtStat"))
+            {
+                List<CAN_Signal> lst = _SignalList.FindAll(p => p.Name == "JmpStrtStat");
+
+            }
+
+            List<CAN_Message> lst1 = CAN_Matrix.ToList().FindAll(p => p.Name == "Hybrid_Information_SuperSlow_LS");
+            List<CAN_Message> lst2 = CAN_Matrix.ToList().FindAll(p => p.ID == 0x1045C060);
+
+
+            //remove invalid message which is in dbc file
+            if (CAN_Matrix.Any(p => p.Name == "VECTOR__INDEPENDENT_SIG_MSG"))
+            {
+                CAN_Message temp = CAN_Matrix.First(p => p.Name == "VECTOR__INDEPENDENT_SIG_MSG");
+                CAN_Matrix.Remove(temp);
+            }
+            //get right format CAN ID
+            foreach (var item in CAN_Matrix)
+            {
+                if ((item.ID & 0x80000000) > 0)
+                {
+                    item.ID = item.ID & 0x8FFFFFFF;
+                }
+            }
+            streamReader.Close();
+            streamReader.Dispose();
+        }
+
+        #region diagnosis
+        Dictionary<string, List<string>> SIDs_dict = new Dictionary<string, List<string>>();
+        List<byte[]> ReceivedDiagList = new List<byte[]>();
+        public Dictionary<uint, string> NRCcode = new Dictionary<uint, string>();
+        int diagMsgNum = 0;
+        string current_didName = "";
+        bool waitFlag = false;
+        List<byte> validDataReceived;
+
+        List<byte[]> diagMsgList;
+        void LoadDiagFile()
+        {
+            StreamReader streamReader = new StreamReader(DiagFilePath);
+            string Line = "";
+            
+            Diag_DID Temp_DID =new Diag_DID();
+
+            while ((Line = streamReader.ReadLine()) != null)
+            {
+                string head= Line.Split('(')[0].Trim();
+                string[] Temp = Line.Split(',');           
+                if (Temp.Length > 1)
+                {
+                    switch (head)
+                    {
+                        case "sid":
+                            string rw = "";
+                            if (Temp[0].ToLower().Contains("read") || Temp[0].ToLower().Contains("request"))
+                            {
+                                rw = "Read";
+                            }
+                            else if (Temp[0].ToLower().Contains("write") || Temp[0].ToLower().Contains("send"))
+                            {
+                                rw = "Write";
+                            }
+                            else { rw = "Command"; }
+                            if (!SIDs_dict.ContainsKey(Temp[0].Split('$')[1].Split(')')[0]))
+                            { SIDs_dict[Temp[0].Split('$')[1].Split(')')[0]] = new List<string>() { Temp[1].ToLower().Trim(), rw }; }                            
+                            break;
+                        case "did":
+                            if (Temp_DID.DIDname != "")
+                            {
+                                _Diag_Matrix.Add(Temp_DID);
+                            }
+                            byte[] id ;
+                            byte bHigh = (byte)(hex2Decimal(Temp[1].ToString()) / 256);
+                            byte bLow = (byte)((byte)(hex2Decimal(Temp[1].ToString()) % 256));
+                            if (bHigh == 0)
+                            {
+                                id = new byte[] { bLow };
+                            }
+                            else
+                            {
+                                id = new byte[] { bHigh,bLow };
+                            }
+                            Temp_DID = new Diag_DID(id,Temp[0].Split('(')[1], uint.Parse(Temp[2].ToString()), RWStatus.Read);
+
+                            //Console.WriteLine(Temp[3]);
+                            string DIDtypeString = Temp[3].Split(')')[0].ToString().Trim();
+                            switch (DIDtypeString)
+                            {
+                                case "Read":
+                                    Temp_DID.DIDType = DIDType.Read;
+                                    break;                               
+                                case "Read_Parameter_Identifier":
+                                    Temp_DID.DIDType = DIDType.Read;
+                                    break;
+                                case "ReadOnceReadScheduledSlow":
+                                    Temp_DID.DIDType = DIDType.Read;
+                                    break;
+                                case "ReadWrite":
+                                    Temp_DID.DIDType = DIDType.ReadWrite;
+                                    break;
+                                case "ReadReturnControl":
+                                    Temp_DID.DIDType = DIDType.ReadWrite;
+                                    break;
+                                case "Send":
+                                    Temp_DID.DIDType = DIDType.Send;
+                                    break;
+                                case "TransferData":
+                                    Temp_DID.DIDType = DIDType.TransferData;
+                                    break;
+                                case "PID_list":
+                                    Temp_DID.DIDType = DIDType.PID_list;
+                                    break;
+                                case "Control":
+                                    Temp_DID.DIDType = DIDType.Control;
+                                    break;
+                                case "Start":
+                                    Temp_DID.DIDType = DIDType.Start;
+                                    break;
+                                case "StartResults":
+                                    Temp_DID.DIDType = DIDType.StartResults;
+                                    break;
+                                case "StartStop":
+                                    Temp_DID.DIDType = DIDType.StartStop;
+                                    break;
+                                case "Reset":
+                                    Temp_DID.DIDType = DIDType.Reset;
+                                    break;
+                                case "Setup":
+                                    Temp_DID.DIDType = DIDType.Setup;
+                                    break;
+                                default:
+                                    Temp_DID.DIDType = (DIDType)Enum.Parse(typeof(DIDType), DIDtypeString, false);
+                                    break;
+
+                            }
+
+                            string[] securityStrings = new string[4] { "sps", "seed", "key", "security" };
+                            string[] communicationStrings = new string[2] { "RxAndEnableTx", "RxAndDisableTx" };
+                            string getString = Temp[0].Split('(')[1].ToString().Trim().ToLower();
+
+                            //session 10
+                            if (Temp_DID.DIDType == DIDType.Start)
+                                Temp_DID.writeSID = 0x10;
+                            //routine start and stop 31
+                            else if (Temp_DID.DIDType == DIDType.StartStop)
+                            {
+                                Temp_DID.writeSID = 0x3101;//start
+                                Temp_DID.readSID = 0x3102;//stop
+                                Temp_DID.IDtype = IDtype.RID;
+                            }
+                            //routine start and result 31
+                            else if (Temp_DID.DIDType == DIDType.StartResults)
+                            {
+                                Temp_DID.writeSID = 0x3101;//start
+                                Temp_DID.readSID = 0x3103;//result
+                                Temp_DID.IDtype = IDtype.RID;
+                            }
+                            //Security 27                     
+                            else if ((Temp_DID.DIDType == DIDType.Request || Temp_DID.DIDType == DIDType.Send) && securityStrings.Any(s => getString.IndexOf(s, StringComparison.OrdinalIgnoreCase) >= 0))//sid 27
+                            {
+                                Temp_DID.readSID = Temp_DID.writeSID = 0x27;
+                            }
+                            //28
+                            else if (Temp_DID.DIDType == DIDType.Control && communicationStrings.Any(s => getString.IndexOf(s, StringComparison.OrdinalIgnoreCase) >= 0)) //EnableRxAndEnableTx
+                                Temp_DID.writeSID = 0x28;
+                            else if (Temp[0].Split('(')[1].Trim().Contains("ID_"))
+                            {
+                                Temp_DID.IDtype = (IDtype)Enum.Parse(typeof(IDtype), Temp[0].Split('(')[1].Split('_')[0].ToString().Trim(), false);
+                                foreach (var sid in SIDs_dict)
+                                {
+                                    if (sid.Value[0] == Temp[0].Split('(')[1].Split('_')[0].ToString().Trim().ToLower() && ( sid.Value[1] == "Read"))//sid type:read
+                                    {
+                                        Temp_DID.readSID = (uint)hex2Decimal("0x" + sid.Key);
+                                        break;
+                                    }
+                                }
+                                foreach (var sid in SIDs_dict)
+                                {
+                                    if (sid.Value[0] == Temp[0].Split('(')[1].Split('_')[0].ToString().Trim().ToLower() && (sid.Value[1] == "Command" || sid.Value[1] == "Write"))//sid type:write
+                                    {
+                                        Temp_DID.writeSID = (uint)hex2Decimal("0x" + sid.Key);
+                                        break;
+                                    }
+                                }                              
+                            }
+                            
+                          
+                            else //other DIDs
+                            {
+                                Temp_DID.IDtype = IDtype.DID;
+
+                                foreach (var sid in SIDs_dict)
+                                {
+                                    if (sid.Value[0] == Temp_DID.IDtype.ToString().ToLower() && (sid.Value[1] == "Read"))//sid type:read
+                                    {
+                                        Temp_DID.readSID = (uint)hex2Decimal("0x" + sid.Key);
+                                        break;
+                                    }
+                                }
+                                foreach (var sid in SIDs_dict)
+                                {
+                                    if (sid.Value[0] == Temp_DID.IDtype.ToString().ToLower() && (sid.Value[1] == "Command" || sid.Value[1] == "Write"))//sid type:write
+                                    {
+                                        Temp_DID.writeSID = (uint)hex2Decimal("0x" + sid.Key);
+                                        break;
+                                    }
+                                }
+                            }
+
+                            break;
+                        case "data":
+                            Diag_Signal diagSignal = new Diag_Signal();
+
+                            string[] TempData = Line.Split('(')[1].Split(')')[0].Split(',');
+                            
+                            diagSignal.Diag_signalName = TempData[0];
+                            diagSignal.DIDname = Temp_DID.DIDname;
+                            diagSignal.startBit = int.Parse(TempData[1].ToString());
+                            diagSignal.bitLength = int.Parse(TempData[2].ToString());           
+                            diagSignal.byteOrder = (byteOrder)Enum.Parse(typeof(byteOrder), TempData[3].ToString(), false);
+                            diagSignal.factor = double.Parse(TempData[4].ToString());
+                            diagSignal.offset = double.Parse(TempData[5].ToString());                            
+                            diagSignal.unit = TempData[8].ToString();
+                            diagSignal.minValue = double.Parse(TempData[6].ToString());
+                            diagSignal.maxValue = double.Parse(TempData[7].ToString());
+                            //dataFormat
+                            if (diagSignal.unit.Trim() != "None")
+                            {
+                                diagSignal.dataFormat = getDataFormat("physical");
+                            }
+                            else
+                            {
+                                diagSignal.dataFormat = getDataFormat(TempData[9].ToString());
+                            }
+                            //max and min for non physical
+                            if (diagSignal.dataFormat != dataFormat.physical)
+                            {
+                                double max = (Math.Pow(2, diagSignal.bitLength) - 1) * diagSignal.factor + diagSignal.offset;
+                                double min= 0 * diagSignal.factor + diagSignal.offset;
+                                diagSignal.maxValue = max;
+                                diagSignal.minValue = min;
+                            }
+                            
+                            //default
+                            string TempDefaultvalueStr = "";
+                            if (TempData[10].Contains('['))//multi
+                            {
+                                string[] TempDefaultvalue = Line.Split('[')[1].Split(']')[0].Split(',');
+                                double defaultV = 0;  
+                                if (diagSignal.byteOrder == byteOrder.big_endian)
+                                {
+                                    for (int i = 0; i < TempDefaultvalue.Length; i++)
+                                    {
+                                        defaultV += double.Parse(TempDefaultvalue[i]) * Math.Pow(256, i);
+                                        TempDefaultvalueStr += byte.Parse(TempDefaultvalue[i]).ToString("X2") + " ";
+                                    }
+                                    diagSignal.defValue = defaultV* diagSignal.factor+diagSignal.offset;
+                                }
+                                else
+                                {
+                                    for (int i = 0; i < TempDefaultvalue.Length; i++)
+                                    {
+                                        defaultV += double.Parse(TempDefaultvalue[TempDefaultvalue.Length-i]) * Math.Pow(256, i);
+                                        TempDefaultvalueStr += byte.Parse(TempDefaultvalue[TempDefaultvalue.Length - i]).ToString("X2") + " ";
+                                    }
+                                    diagSignal.defValue = defaultV * diagSignal.factor + diagSignal.offset;
+                                }                              
+                                
+                            }
+                            else //one
+                            { 
+                                double value= double.Parse(TempData[10]);//physical value
+                                diagSignal.defValue = value;
+                                double rawValue= (value-diagSignal.offset)/diagSignal.factor;
+
+                                int byteNum = (int)Math.Ceiling(diagSignal.bitLength / 8.0) ;
+                                string formatStr = "X" + (byteNum*2).ToString();
+                                if (byteNum > 32)
+                                {
+                                    string pre0 = "";
+                                    for (int i=0;i< byteNum-32;i++)
+                                    {
+                                        pre0 += "00";
+                                    }
+                                    TempDefaultvalueStr = pre0 + ((long)rawValue).ToString("X64");
+                                }
+                                else
+                                    TempDefaultvalueStr=((long)rawValue).ToString(formatStr);
+                                for (int i = 1; i < byteNum; i++)
+                                {
+                                    TempDefaultvalueStr=TempDefaultvalueStr.Insert((byteNum-i)*2," ");
+                                }
+                            }
+
+                            diagSignal.hexData = TempDefaultvalueStr.Trim();
+                            diagSignal.value = diagSignal.defValue;
+                            Temp_DID.Set_Signal(diagSignal, (long)diagSignal.defValue);
+
+                            //valuetable
+                            if (Line.Contains('{'))//vt
+                            {
+                                diagSignal.valueTable = Line.Split('{')[1].Split('}')[0].Replace('\'', ' ').Split(',').ToList();                               
+                            }
+
+                            Temp_DID.did_signals.Add(diagSignal);
+                            _Diag_SignalList.Add(diagSignal);
+                            break;
+
+                    }
+
+                }
+            }
+ 
+            streamReader.Close();
+            streamReader.Dispose();
+        }
+
+        private void Send_DiagSignal(string DIDname, string diagSignalName, double signalValue, string hex_signalData,RWStatus rw, bool isHex=false)
+        {
+            try
+            {
+                if (!_Diag_Matrix.Any(p => p.DIDname == DIDname))
+                {
+                    Log.Logger_Run("DIDname is not found in cdd.");
+                    return;
+                }
+                bool flag = false;
+                if (rw == RWStatus.Read)
+                {
+                    flag = true;
+                }
+                else 
+                {
+                    if (diagSignalName != "")
+                    {
+                        if(isHex)
+                            flag = Set_DiagSignal_Hex(DIDname, diagSignalName, hex_signalData);
+                        else
+                            flag = Set_DiagSignal(DIDname, diagSignalName, signalValue);
+                    }
+                    else { flag = true; }
+                    
+                }
+                if (flag)
+                {
+                    List<byte> data = new List<byte>();
+                    Diag_DID did = _Diag_Matrix.First(p => p.DIDname == DIDname);
+                    did.RWStatus = rw;
+                    did.respond = "";
+                    uint sid = 0;
+                    if (rw == RWStatus.Write || rw == RWStatus.Command)
+                    {
+                        if (did.writeSID > 255)
+                        {
+                            data.Add((byte)(did.writeSID >>8));
+                            data.Add((byte)(did.writeSID & 0xFF));
+                        }                            
+                        else
+                            data.Add((byte)did.writeSID);
+                        foreach (byte id in did.id)
+                        {
+                            data.Add(id);
+                        }
+
+                        foreach (var dt in did.Data)
+                        {
+                            data.Add(dt);
+                        }
+                    }
+                    else if (rw == RWStatus.Read)
+                    {
+                        if (did.readSID > 255)
+                        {
+                            data.Add((byte)(did.readSID >> 8));
+                            data.Add((byte)(did.readSID & 0xFF));
+                        }
+                        else
+                            data.Add((byte)did.readSID);
+             
+                        foreach (byte id in did.id)
+                        {
+                            data.Add(id);
+                        }
+                    }
+                    diagMsgList = split15765(data);
+
+                    CAN_Message msg = CAN_Matrix.First(p => p.ID == diagReq_ID);
+
+                    // send first frame
+                    waitFlag = false;
+                    Pmessage temp_msg = new Pmessage(diagReq_ID, Convert.ToByte(diagMsgList[0].Count()), diagMsgList[0], TxRxType.Tx, (Convert.ToInt16(msg.Type) > 1), 0);
+                    _driver.SendMessage(temp_msg);
+
+                    current_didName = DIDname;
+                    return;
+                }
+                else
+                {
+                    //signal is read type, forbid setting value
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Send_Signal(string signalName, double signal_PhysicValue)\n{0}\n{1}", ex.Message, ex.StackTrace));
+            }
+        }
+        private void waitDID(int timeout)
+        {
+            for (int i = 0; i < timeout; i++)
+            {
+                if (waitFlag)
+                {
+                    Thread.Sleep(50);
+                    break;
+                }
+                Thread.Sleep(1);
+            }
+            waitFlag = false;
+        }
+        private List<byte> merge15765(List<byte[]> MsgDataList)//return data byte[]
+        {
+            List<byte> valid_data;
+            int valid_dlc = 0;//valid data length
+            int head = (MsgDataList[0][0] & 0xF0) >> 4;
+
+            if (head == 0)//single frame
+            {
+                valid_dlc = MsgDataList[0][0] & 0xF;
+                valid_data = new List<byte>();
+                //add frame to valid data
+                for (int i = 1; i < valid_dlc + 1; i++)
+                {
+                    valid_data.Add(MsgDataList[0][i]);
+                }
+                return valid_data;
+
+            }
+            else if (head == 1)//multi frame
+            {
+                int dlc_h = ((int)MsgDataList[0][0] & (int)0xF) << 8;
+                int dlc_l = (int)MsgDataList[0][1];
+                valid_dlc = dlc_h + dlc_l;
+                valid_data = new List<byte>();
+                //add first frame to valid data
+                for (int i = 2; i < 8; i++)
+                {
+                    valid_data.Add(MsgDataList[0][i]);
+                }
+
+                for (int i = 1; i < MsgDataList.Count; i++)//Continuous frame
+                {
+                    int head_CF = (MsgDataList[i][0] & 0xF0) >> 4;
+                    int CF_SN = MsgDataList[i][0] & 0xF;
+                    if (head_CF == 2)//add CF to valid data
+                    {
+                        for (int j = 1; j < 8; j++)//each byte
+                        {
+                            valid_data.Add(MsgDataList[i][j]);
+                        }
+                    }
+                }
+                if (valid_data.Count() > valid_dlc)//当累加的数据大于有效长度时，截取有效数据长度的数据
+                {
+                    valid_data = valid_data.GetRange(0, valid_dlc);
+                }
+                return valid_data;
+
+            }
+            else { return null; }
+
+        }
+        private List<byte[]> split15765(List<byte> validData)
+        {
+            List<byte> tempData = new List<byte>();
+            List<byte[]> frame_list = new List<byte[]>();
+            int dlc = validData.Count();
+            if (dlc <= 7)//signal frame
+            {
+                tempData.Add(Convert.ToByte("0"+ dlc.ToString("X1"),16));
+            }
+            else//multi frame
+            {
+                string head = "1"+dlc.ToString("X3");
+                tempData.Add(Convert.ToByte(head.Substring(0, 2),16));
+                tempData.Add(Convert.ToByte(head.Substring(2, 2),16));
+            }            
+            int SN = 0;
+            for (int i = 0; i < dlc; i++)
+            {
+                tempData.Add(validData[i]) ;               
+                if (tempData.Count==8)//new frame
+                {
+                    frame_list.Add(tempData.ToArray());
+                    if (i < dlc-1)
+                    {
+                        tempData = new List<byte>();
+                        SN++;
+                        if (SN > 15)
+                        {
+                            SN = 0;
+                        }
+                        string cfHead = "2" + SN.ToString("X1");
+                        tempData.Add(Convert.ToByte(cfHead, 16));
+                    }
+                }
+            }
+            int count = tempData.Count;
+            if (count < 8)
+            {
+                for (int i = 0; i < 8 - count; i++)
+                {
+                    tempData.Add(0);
+                }
+                frame_list.Add(tempData.ToArray());
+            }
+            
+            return frame_list;
+        }
+        private void receiveDiagMsg(Pmessage Msg)
+        {
+
+            //List<byte> validData;
+            int head = (Msg.Data[0] & 0xF0) >> 4;
+            if (head == 1)//send 30
+            {
+                send30();
+            }
+            if (head == 0 || head == 1)
+            {
+                ReceivedDiagList.Clear();
+                diagMsgNum = get_DiagMsgNum(Msg);
+            }
+            if (head == 0 || head == 1 || head == 2)
+            {
+                ReceivedDiagList.Add(Msg.Data);
+
+                if (ReceivedDiagList.Count == diagMsgNum)//读完了
+                {
+                    validDataReceived = merge15765(ReceivedDiagList);
+                    ReceivedDiagList.Clear();
+                    diagMsgNum = 0;
+
+                    Diag_DID did = new Diag_DID();
+                    if (current_didName != "")
+                        did = _Diag_Matrix.First(p => p.DIDname == current_didName);                   
+
+                    //respond
+                    string res = "";
+                    foreach (var data in validDataReceived)
+                    {
+                        res += data.ToString("X2") + " ";
+                    }
+                    did.respond = res;
+
+                    if (validDataReceived[0] != 0x7F && validDataReceived[0] != 0x7E )
+                    {
+                        if (did.RWStatus == RWStatus.Read)
+                        {
+                            int id_num = 0;
+                            if (did.DIDname!="")                           
+                                id_num = did.id.Count() + 1;//id byte number +sid byte number
+                            did.DLC = (uint)(validDataReceived.Count - id_num);
+                            byte[] data = validDataReceived.GetRange(id_num, (int)did.DLC).ToArray();
+                            did.Data = data;
+                        }                        
+                    }
+                    else if (validDataReceived[0] == 0x7F)//NRC
+                    {
+                        did.respond += " - " + NRCcode[validDataReceived[2]];
+                    }          
+                 
+                    //flag
+                    waitFlag = true;
+
+                }
+            }
+            if (head == 3)//flow control
+            {
+                int stTime = Msg.Data[2];//interval each frame
+                CAN_Message msg = CAN_Matrix.First(p => p.ID == diagReq_ID);
+
+                // send continuous frame
+                for (int i = 1; i < diagMsgList.Count; i++)
+                {
+                    Pmessage temp_msg = new Pmessage(diagReq_ID, Convert.ToByte(diagMsgList[i].Count()), diagMsgList[i], TxRxType.Tx, (Convert.ToInt16(msg.Type) > 1), 0);
+                    _driver.SendMessage(temp_msg);
+                    Thread.Sleep(stTime);
+                }
+                               
+            }
+
+        }
+        private void initNRC()
+        {
+            NRCcode[0x10] = "General reject";
+            NRCcode[0x11] = "Service not supported";
+            NRCcode[0x12] = "Sub-function not supported";
+            NRCcode[0x13] = "Incorrect message length or invalid format";
+            NRCcode[0x14] = "Response too long";
+            NRCcode[0x21] = "Busy repeat request";
+            NRCcode[0x22] = "Conditions not correct";
+            NRCcode[0x24] = "Request sequence error";
+            NRCcode[0x25] = "No response from sub-net component";
+            NRCcode[0x26] = "Failure prevents execution of requested action";
+            NRCcode[0x31] = "Request out of range";
+            NRCcode[0x33] = "Security access denied";
+            NRCcode[0x35] = "Invalid key";
+            NRCcode[0x36] = "Exceeded number of attemps";
+            NRCcode[0x37] = "Required time delay not expired";
+            NRCcode[0x70] = "Upload/download not accept";
+            NRCcode[0x71] = "Transfer data suspended";
+            NRCcode[0x72] = "General programming failure";
+            NRCcode[0x73] = "Wrong block sequence counter";
+            NRCcode[0x78] = "Request correctly received, but response is pending";
+            NRCcode[0x7E] = "Sub-function not supported in active session";
+            NRCcode[0x7F] = "Service not supported in active session";
+            NRCcode[0x83] = "The engine is running";
+            NRCcode[0x84] = "Engine out of action";
+            NRCcode[0x90] = "The shift lever is not inparking gear";
+            NRCcode[0x92] = "Over voltage";
+            NRCcode[0x93] = "Low voltage";
+        }
+        private int get_DiagMsgNum(Pmessage FFMsg)
+        {
+            int valid_dlc = 0;//valid data length
+            int head = (FFMsg.Data[0] & 0xF0) >> 4;
+            int ReceivedDiagMsgNum = 0;
+            if (head == 0)//single frame
+            {
+                ReceivedDiagMsgNum = 1;
+            }
+            else if (head == 1)//multi frame
+            {
+                int dlc_h = (int)(FFMsg.Data[0] & 0xF) << 8;
+                int dlc_l = (int)FFMsg.Data[1];
+                valid_dlc = dlc_h + dlc_l;
+
+                ReceivedDiagMsgNum = (int)Math.Ceiling((valid_dlc - 6) / 7.0) + 1;
+            }
+
+            return ReceivedDiagMsgNum;
+        }
+        private void send30()
+        {
+            byte[] data = new byte[8] { 0x30, 0x0, 0xA, 0x0, 0x0, 0x0, 0x0, 0x0 };
+            Send_CAN_message(diagReq_ID, 8, data);
+        }
+        dataFormat getDataFormat(string format)
+        {
+            if (format == "text")
+            {
+                return dataFormat.text;
+            }
+            else if (format == "hex")
+            {
+                return dataFormat.hex;
+            }
+            else if (format == "dec")
+            {
+                return dataFormat.dec;
+            }
+            else if (format == "physical")
+            {
+                return dataFormat.physical;
+            }
+            else
+                return dataFormat.hex;
+        }
+        private async Task testerPresent(CancellationToken token, int dlc,int tpcycle)
+        {
+            while (true)
+            {
+                await Task.Delay(tpcycle, token);
+                Send_CAN_message(diagReq_ID, 8, new byte[] { (byte)dlc, 0x3E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 });  
+            }
+        }
+
+        #endregion
+
+        uint maskedID(uint msgID)//input 11bit or 29bit id, return masked id if it is 29bit, return the original 11bit id
+        {
+            if ((msgID & 0xFFFFF000) == 0)//11bit ID
+            {
+                return msgID;
+            }
+            else//29 bit id
+            {
+                return msgID & mask;
+            }
+        }
+        void SendNetworkMessagePulse()
+        {
+            //List<CAN_Message> ToSendNM_Msgs = CAN_Matrix.Where(p => p.IsNMAsrMesssage == true).ToList();
+            List<CAN_Message> ToSendNM_Msgs = CAN_Matrix.ToList().FindAll(p => p.IsNMAsrMesssage == true);
+            if (ToSendNM_Msgs.Count > 0)
+            {
+                for (int i = 0; i < 5; i++)
+                {
+                    foreach (var item in ToSendNM_Msgs)
+                    {
+                        if (item.TxRx == TxRxType.Tx)
+                        {
+                            Pmessage temp_msg = new Pmessage(item.ID, Convert.ToByte(item.DLC), item.Data, TxRxType.Tx, (Convert.ToInt16(item.Type) > 1), 0, false);
+                            _driver.SendMessage(temp_msg);
+                            Thread.Sleep(15);
+                        }
+                    }
+                }
+            }
+        }
+        void BlockAllTxCyclicMessageInDBC()
+        {
+            foreach (var item in CAN_Matrix)
+            {
+                if (item.TxRx == TxRxType.Tx && item.Method != Tx_Method.Spontan)
+                {
+                    item.State = Message_State.Paused;
+                }
+            }
+        }
+        void Set_ID_MessageList()
+        {
+            foreach (var item in CAN_Matrix)
+            {
+                _DBC_CANidList.Add(item.ID);
+                if (item.TxRx == TxRxType.Tx && item.Method != Tx_Method.Spontan)
+                {
+                    _CAN_TxCyclicList.Add(item);
+                }
+                else if (item.TxRx == TxRxType.Rx)
+                {
+                    _DBC_RxCANidList.Add(item.ID);
+                }
+            }
+        }
+        void SetLastSendTime()
+        {
+            Random rd = new Random();
+            foreach (var item in _CAN_TxCyclicList)
+            {
+                int mstime = rd.Next(1, 1000);
+                item.LastSendTimeMs = DateTime.Now.Ticks / 10000L + mstime;
+            }
+        }
+        bool Import_ARXML_ThenSending()
+        {
+            try
+            {
+                if (!File.Exists(DBCFilePath))
+                {
+                    return false;
+                }
+
+                isInImportdbcProcess = true;
+                Thread.Sleep(15);
+                ClearCANList();
+
+                LoadARXML();
+                Set_ID_MessageList();
+                SendNetworkMessagePulse();
+                SetLastSendTime();
+                isInImportdbcProcess = false;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("catch exception: Import_ARXML_ThenSending()\n{0}\n{1}", ex.Message, ex.StackTrace));
+                ClearCANList();
+                isInImportdbcProcess = false;
+                return false;
+            }
+        }
+        bool Import_ARXML_WithoutSending()
+        {
+            try
+            {
+                if (!File.Exists(DBCFilePath))
+                {
+                    return false;
+                }
+
+                isInImportdbcProcess = true;
+                Thread.Sleep(15);
+                ClearCANList();
+
+                LoadARXML();
+                Set_ID_MessageList();
+                BlockAllTxCyclicMessageInDBC();
+                isInImportdbcProcess = false;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("catch exception: Import_ARXML_WithoutSending()\n{0}\n{1}", ex.Message, ex.StackTrace));
+                ClearCANList();
+                isInImportdbcProcess = false;
+                return false;
+            }
+        }
+
+        public bool Import_FIBEX(string flbex_xml)
+        {
+            try
+            {
+                if (!File.Exists(flbex_xml))
+                {
+                    return false;
+                }
+                DBCFilePath = flbex_xml;
+                isInImportflbexProcess = true;
+                Thread.Sleep(15);
+                _FlexRay_SignalList.Clear();
+                FlexRay_Matrix.Clear();
+                load_FIBEX(flbex_xml);
+                isInImportflbexProcess = false;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("catch exception: Import_FIBEX()\n{0}\n{1}", ex.Message, ex.StackTrace));
+                _FlexRay_SignalList.Clear();
+                FlexRay_Matrix.Clear();
+                isInImportflbexProcess = false;
+                return false;
+            }
+        }
+
+        private void load_FIBEX(string flbex_xml)
+        {
+            Dictionary<string, CodingStrcture> Coding_List = new Dictionary<string, CodingStrcture>();
+            Dictionary<string, ScheduleTimingStrcture> ScheduleTiming_List = new Dictionary<string, ScheduleTimingStrcture>();
+            Dictionary<string, List<string>> Signal_Group_List = new Dictionary<string, List<string>>();
+            Dictionary<string, List<string>> ECU_Group_List = new Dictionary<string, List<string>>();
+
+            XmlDocument xmldoc = new XmlDocument();
+            XmlReaderSettings settings = new XmlReaderSettings();
+            settings.IgnoreComments = true;
+            XmlReader reader = XmlReader.Create(flbex_xml, settings);
+            xmldoc.Load(reader);
+
+            XmlNamespaceManager namespaceManager = new XmlNamespaceManager(xmldoc.NameTable);
+            namespaceManager.AddNamespace("fx", "http://www.asam.net/xml/fbx");
+            namespaceManager.AddNamespace("ho", "http://www.asam.net/xml");
+
+            XmlNodeList channel_nodelist = xmldoc.SelectNodes("//fx:ELEMENTS//fx:CHANNELS//fx:CHANNEL", namespaceManager);
+            foreach (XmlElement node in channel_nodelist)
+            {
+                XmlNodeList frame_trigger_nodelist = node.SelectNodes("fx:FRAME-TRIGGERINGS//fx:FRAME-TRIGGERING", namespaceManager);
+                foreach (XmlElement node1 in frame_trigger_nodelist)
+                {
+                    string frame_trigger_id = node1.Attributes.GetNamedItem("ID").InnerText;
+                    //Console.WriteLine("frame_trigger_id GUID: " + frame_trigger_id);
+
+                    string Slot_id = node1.SelectSingleNode("fx:TIMINGS//fx:ABSOLUTELY-SCHEDULED-TIMING//fx:SLOT-ID", namespaceManager).InnerText;
+                    string base_cycle = node1.SelectSingleNode("fx:TIMINGS//fx:ABSOLUTELY-SCHEDULED-TIMING//fx:BASE-CYCLE", namespaceManager).InnerText;
+                    string repetition = node1.SelectSingleNode("fx:TIMINGS//fx:ABSOLUTELY-SCHEDULED-TIMING//fx:CYCLE-REPETITION", namespaceManager).InnerText;
+
+                    string frame_ref = node1.SelectSingleNode("fx:FRAME-REF", namespaceManager).Attributes.GetNamedItem("ID-REF").InnerText;
+
+                    ScheduleTiming_List.Add(frame_ref, new ScheduleTimingStrcture
+                    {
+                        slot_id = Convert.ToUInt32(Slot_id),
+                        offset = Convert.ToUInt32(base_cycle),
+                        repetition = Convert.ToUInt32(repetition),
+                        frame_trigger_id = frame_trigger_id,
+                        txrx = TxRxType.Rx,  //default
+                });
+                }
+            }
+
+            List<string> luu = new List<string> { };
+            XmlNodeList ecu_nodelist = xmldoc.SelectNodes("//fx:ECUS//fx:ECU", namespaceManager);
+            foreach (XmlElement node in ecu_nodelist)
+            {
+                string ecu_name = node.SelectSingleNode("ho:SHORT-NAME", namespaceManager).InnerText.ToUpper();
+                if (ecu_name == _benchName.ToUpper())
+                {
+                    XmlNodeList connector_nodelist = node.SelectNodes("fx:CONNECTORS//fx:CONNECTOR", namespaceManager);
+                    foreach (XmlElement node1 in connector_nodelist)
+                    {
+                        XmlNodeList output_nodelist = node1.SelectNodes("fx:INPUTS//fx:INPUT-PORT", namespaceManager);
+                        foreach (XmlElement node2 in output_nodelist)
+                        {
+                            string pdu_trigger_ref = node2.SelectSingleNode("fx:FRAME-TRIGGERING-REF", namespaceManager).Attributes.GetNamedItem("ID-REF").InnerText;
+                            luu.Add(pdu_trigger_ref);
+                            if (ScheduleTiming_List.Any(p => p.Value.frame_trigger_id == pdu_trigger_ref))
+                            {
+                                ScheduleTimingStrcture ss = ScheduleTiming_List.First(p => p.Value.frame_trigger_id == pdu_trigger_ref).Value;
+                                ss.txrx = TxRxType.Tx;
+                            }
+                        }
+                    }
+                }
+            }
+
+            XmlNode codings_node = xmldoc.SelectSingleNode("//fx:PROCESSING-INFORMATION//fx:CODINGS", namespaceManager);
+            if (codings_node == null)
+            {
+                return;
+            }
+
+            //get coding list
+            XmlNodeList coding_nodelist = codings_node.SelectNodes("fx:CODING", namespaceManager);
+            foreach (XmlElement node in coding_nodelist)
+            {
+                CodingStrcture code = new CodingStrcture();
+
+                string GUID = node.Attributes.GetNamedItem("ID").InnerText;
+                //Console.WriteLine("Coding GUID: " + GUID);
+                string bit_length = node.SelectSingleNode("ho:CODED-TYPE//ho:BIT-LENGTH", namespaceManager).InnerText;
+                //Console.WriteLine("bit_length: " + bit_length);
+                code.bit_length = Convert.ToUInt32(bit_length);
+                XmlNode coding_method_node = node.SelectSingleNode("ho:COMPU-METHODS", namespaceManager);
+                if (coding_method_node == null)
+                {
+                    continue;
+                }
+
+                XmlNodeList coding_method_nodelist = coding_method_node.SelectNodes("ho:COMPU-METHOD", namespaceManager);
+                foreach (XmlElement node1 in coding_method_nodelist)
+                {
+                    string category_name = node1.SelectSingleNode("ho:CATEGORY", namespaceManager).InnerText;
+                    if (category_name == "LINEAR")
+                    {
+                        string rawMin = "";
+                        string rawMax = "";
+                        try
+                        {
+                            rawMin = node1.SelectSingleNode("ho:PHYS-CONSTRS//ho:SCALE-CONSTR//ho:LOWER-LIMIT", namespaceManager).InnerText;
+                            rawMax = node1.SelectSingleNode("ho:PHYS-CONSTRS//ho:SCALE-CONSTR//ho:UPPER-LIMIT", namespaceManager).InnerText;
+                        }
+                        catch (Exception ex)
+                        {
+                            rawMin = node1.SelectSingleNode("ho:COMPU-INTERNAL-TO-PHYS//ho:COMPU-SCALES//ho:COMPU-SCALE//ho:LOWER-LIMIT", namespaceManager).InnerText;
+                            rawMax = node1.SelectSingleNode("ho:COMPU-INTERNAL-TO-PHYS//ho:COMPU-SCALES//ho:COMPU-SCALE//ho:UPPER-LIMIT", namespaceManager).InnerText;
+                        }
+
+                        XmlNodeList vd_nodelist = node1.SelectNodes("ho:COMPU-INTERNAL-TO-PHYS//ho:COMPU-SCALES//ho:COMPU-SCALE//ho:COMPU-RATIONAL-COEFFS//ho:COMPU-NUMERATOR//ho:V", namespaceManager);
+
+                        string offset = vd_nodelist[0].InnerText;
+                        string factor = vd_nodelist[1].InnerText;
+                        code.offset = Convert.ToDouble(offset);
+                        code.factor = Convert.ToDouble(factor);
+                        code.minimum = Convert.ToDouble(rawMin);
+                        code.maximum = Convert.ToDouble(rawMax);
+                        if (rawMax.IndexOf("E") > 0)
+                        {
+                            double decimal1 = Convert.ToDouble(rawMax.Split('E')[0]);
+                            double y = Convert.ToDouble(rawMax.Split('E')[1]);
+                            double rawmaxdoub = decimal1 * Math.Pow(10, y);
+                            code.maximum = rawmaxdoub * code.factor + code.offset;
+                        }
+
+                    }
+                }
+                Coding_List.Add(GUID, code);
+
+            }
+
+            //get all signal to list
+            XmlNode signals_node = xmldoc.SelectSingleNode("//fx:ELEMENTS//fx:SIGNALS", namespaceManager);
+            if (signals_node == null)
+            {
+                return;
+            }
+            XmlNodeList signal_nodelist = signals_node.SelectNodes("fx:SIGNAL", namespaceManager);
+            foreach (XmlElement node in signal_nodelist)
+            {
+                CAN_Signal one = new CAN_Signal();
+                string GUID = node.Attributes.GetNamedItem("ID").InnerText;
+                //Console.WriteLine("Signal GUID: " + GUID);               
+                string signal_name = node.SelectSingleNode("ho:SHORT-NAME", namespaceManager).InnerText;
+                one.Name = signal_name;
+                one.GUID = GUID;
+                string coding_ref = node.SelectSingleNode("fx:CODING-REF", namespaceManager).Attributes.GetNamedItem("ID-REF").InnerText;
+                if (Coding_List.ContainsKey(coding_ref))
+                {
+                    CodingStrcture coding = Coding_List[coding_ref];
+                    one.Length = (int)coding.bit_length;
+                    //one.Factor = coding.factor;
+                    //one.Offset = coding.offset;
+                    //one.Maximum = coding.maximum;
+                    //one.Minimum = coding.minimum;
+                    one.Max_Value = (((ulong)1 << (one.Length - 1)) * 2 - 1) * one.Factor + one.Offset;
+                    one.Min_Value = 0;
+                }
+                else
+                {
+                    one.Length = 1;  //Update_bit has no relevant Codeing
+                    one.Max_Value = 1;
+                    one.Min_Value = 0;
+                }
+
+                try
+                {
+                    XmlNode default_value_node = node.SelectSingleNode("fx:DEFAULT-VALUE", namespaceManager);
+
+                    if (default_value_node != null)
+                    {
+                        one.Init_Value = Convert.ToDouble(default_value_node.InnerText);
+                    }
+                    else
+                    {
+                        one.Init_Value = 0;
+                    }
+                    //one.Init_Value = 0;  //we always set Init_Value to 0 now.
+                }
+                catch (Exception ex)
+                {
+                    one.Init_Value = 0;
+                }
+                _FlexRay_SignalList.Add(one);
+            }
+
+            Console.WriteLine("_FlexRay_SignalList Count: " + _FlexRay_SignalList.Count());
+
+            //get all frame message
+            XmlNode frames_node = xmldoc.SelectSingleNode("//fx:ELEMENTS//fx:FRAMES", namespaceManager);
+            if (frames_node == null)
+            {
+                return;
+            }
+            XmlNodeList frame_nodelist = frames_node.SelectNodes("fx:FRAME", namespaceManager);
+            foreach (XmlElement node in frame_nodelist)
+            {
+                string GUID = node.Attributes.GetNamedItem("ID").InnerText;
+                //Console.WriteLine("Frame GUID: " + GUID);
+                string frame_name = node.SelectSingleNode("ho:SHORT-NAME", namespaceManager).InnerText;
+                string frame_length = node.SelectSingleNode("fx:BYTE-LENGTH", namespaceManager).InnerText;
+                //Console.WriteLine(string.Format("Frame Name: {0}, Length: {1}", frame_name, frame_length));
+                FlexRay_Message newmsg = new FlexRay_Message(frame_name, Convert.ToUInt32(frame_length));
+                if (ScheduleTiming_List.ContainsKey(GUID))
+                {
+                    newmsg.ID = ScheduleTiming_List[GUID].slot_id;
+                    newmsg.OffSet = ScheduleTiming_List[GUID].offset;
+                    newmsg.Repetition = ScheduleTiming_List[GUID].repetition;
+                    newmsg.TxRx = ScheduleTiming_List[GUID].txrx;                   
+                }
+
+                //newmsg.Name = frame_name;
+                //newmsg.DLC = Convert.ToUInt32(frame_length);
+                XmlNode pdf_ref = node.SelectSingleNode("fx:PDU-INSTANCES//fx:PDU-INSTANCE//fx:PDU-REF", namespaceManager);
+                string pdu_guid_ref = pdf_ref.Attributes.GetNamedItem("ID-REF").InnerText;
+                //Console.WriteLine("PDU Ref GUID: " + pdu_guid_ref);
+
+                newmsg.PDUName = pdu_guid_ref;
+                FlexRay_Matrix.Add(newmsg);
+            }
+            Console.WriteLine("Flexray_Matrix Count: " + FlexRay_Matrix.Count());
+
+            XmlNode pdus_node = xmldoc.SelectSingleNode("//fx:ELEMENTS//fx:PDUS", namespaceManager);
+            if (pdus_node == null)
+            {
+                return;
+            }
+            XmlNodeList pdu_nodelist = pdus_node.SelectNodes("fx:PDU", namespaceManager);
+            foreach (XmlElement node in pdu_nodelist)
+            {
+                string GUID = node.Attributes.GetNamedItem("ID").InnerText;
+                //Console.WriteLine("PDU GUID: " + GUID);
+                FlexRay_Message msg = null;
+                if (FlexRay_Matrix.Any(p => p.PDUName == GUID))
+                {
+                    msg = FlexRay_Matrix.First(p => p.PDUName == GUID);
+                }
+                else
+                {
+                    continue;
+                }
+
+                XmlNode signals_instance_node = node.SelectSingleNode("fx:SIGNAL-INSTANCES", namespaceManager);
+                if (signals_instance_node == null)
+                {
+                    continue;
+                }
+                XmlNodeList signals_nodelist = signals_instance_node.SelectNodes("fx:SIGNAL-INSTANCE", namespaceManager);
+                foreach (XmlElement node1 in signals_nodelist)
+                {
+                    string signa_startbit = node1.SelectSingleNode("fx:BIT-POSITION", namespaceManager).InnerText;
+                    int update_bit = -1;
+                    try
+                    {
+                        XmlNode UB_value_node = node1.SelectSingleNode("fx:SIGNAL-UPDATE-BIT-POSITION", namespaceManager);
+
+                        if (UB_value_node != null)
+                        {
+                            update_bit = (int)Convert.ToUInt32(UB_value_node.InnerText);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+
+                    }
+
+                    XmlNode signal_ref = node1.SelectSingleNode("fx:SIGNAL-REF", namespaceManager);
+                    string signal_guid_ref = signal_ref.Attributes.GetNamedItem("ID-REF").InnerText;
+                    if (_FlexRay_SignalList.Any(p => p.GUID == signal_guid_ref))
+                    {
+                        CAN_Signal one = _FlexRay_SignalList.First(p => p.GUID == signal_guid_ref);
+                        one.StartBit = (int)Convert.ToUInt32(signa_startbit);
+                        one.UpdateBit = update_bit;
+                        if (update_bit != -1)
+                        {
+                            one.UB_SignalName = one.Name + "_UB";
+                        }
+                        one.name_ref = msg.Name;
+                        msg.Set_Signal_RawValue(one, (ulong)one.Init_Value);
+                        //one.Init_Value = one.Init_Value * one.Factor + one.Offset;//physical value
+                        msg.Signals.Add(one);
+                        if (update_bit != -1)
+                        {
+                            CAN_Signal one_UB = new CAN_Signal();
+                            one_UB.StartBit = update_bit;
+                            one_UB.Length = 1;
+                            one_UB.Max_Value = 1;
+                            one_UB.Min_Value = 0;
+                            one_UB.Name = one.Name + "_UB";
+                            one_UB.UpdateBit = -1;
+                            one_UB.UB_SignalName = "";
+                            one_UB.Init_Value = 0;
+                            one_UB.name_ref = msg.Name;                            
+                            _FlexRay_SignalList.Add(one_UB);
+                            msg.Signals.Add(one_UB);
+                        }
+                    }
+                }
+            }
+
+
+            //get signal_group list
+            XmlNode sg_groups_node = xmldoc.SelectSingleNode("//fx:REQUIREMENTS//fx:SIGNAL-GROUPS", namespaceManager);
+            if (sg_groups_node == null)
+            {
+                return;
+            }
+            XmlNodeList signal_group_nodelist = sg_groups_node.SelectNodes("fx:SIGNAL-GROUP", namespaceManager);
+            foreach (XmlElement node in signal_group_nodelist)
+            {
+                string group_name = node.SelectSingleNode("ho:SHORT-NAME", namespaceManager).InnerText;
+                //Console.WriteLine("Group Name: " + group_name);
+                string full_UB_Name = group_name + "_UB"; //assume all group has _UB.
+                int update_bit = -1;
+                if (!_FlexRay_SignalList.Any(p => p.Name == full_UB_Name))
+                {
+                    continue;
+                }
+                else
+                {
+                    update_bit = _FlexRay_SignalList.First(p => p.Name == full_UB_Name).StartBit;
+                }
+
+                XmlNodeList order_signal_nodelist = node.SelectNodes("fx:ORDERED-SIGNALS//fx:ORDERED-SIGNAL", namespaceManager);
+                Signal_Group_List.Add(group_name, new List<string> { });
+                foreach (XmlElement node1 in order_signal_nodelist)
+                {
+                    string signal_ID_REF = node1.SelectSingleNode("fx:SIGNAL-REF", namespaceManager).Attributes.GetNamedItem("ID-REF").InnerText;
+                    Signal_Group_List[group_name].Add(signal_ID_REF);
+                    if (_FlexRay_SignalList.Any(p => p.GUID == signal_ID_REF))
+                    {
+                        CAN_Signal one = _FlexRay_SignalList.First(p => p.GUID == signal_ID_REF);
+                        one.UB_SignalName = full_UB_Name;
+                        one.UpdateBit = update_bit;
+                        one.SignalGroup_Name = group_name;
+                    }
+                }
+            }
+
+            //List <FlexRay_Message>  ff = FlexRay_Matrix.FindAll(p => p.TxRx == TxRxType.Tx);
+            //FlexRay_Message msg1 = FlexRay_Matrix.First(p => p.Name == "CemBackBoneFr15");
+            //FlexRay_Message msg2 = FlexRay_Matrix.First(p => p.Name == "BbmBackBoneDiagResFrame1");
+
+            Console.WriteLine("End Flexray_Matrix Count: " + FlexRay_Matrix.Count());
+            Console.WriteLine("End _FlexRay_SignalList Count: " + _FlexRay_SignalList.Count());
+        }
+
+        //void LoadARXML_DHU()
+        //{
+        //    XDocument xd = XDocument.Load(DBCFilePath);
+        //    XElement xeRoot = xd.Root;
+        //    IEnumerable<XElement> xemlist = xeRoot.Elements();
+        //    XElement AR_PACKAGES;
+        //    if (xeRoot.Elements().Any(p => p.Name.LocalName == "AR-PACKAGES"))
+        //    {
+        //        AR_PACKAGES = xeRoot.Elements().First(p => p.Name.LocalName == "AR-PACKAGES");
+        //        Console.WriteLine(AR_PACKAGES.Elements().Count());
+        //        foreach (var PACKAGE in AR_PACKAGES.Elements())
+        //        {
+        //            Console.WriteLine(PACKAGE.Elements().Count());
+
+        //            if (PACKAGE.Elements().Any(p => p.Name.LocalName == "SHORT-NAME" && p.Value == "Communication"))
+        //            {
+        //                XElement AR_PACKAGES_2 = PACKAGE.Elements().First(p => p.Name.LocalName == "AR-PACKAGES");
+        //                Console.WriteLine(AR_PACKAGES_2.Elements().Count());
+        //                foreach (var AR_PACKAGES_21 in AR_PACKAGES_2.Elements())
+        //                {
+        //                    XElement AR_PACKAGE_ss = AR_PACKAGES_21.Elements().First(n => n.Name.LocalName == "SHORT-NAME");
+        //                    Console.WriteLine(AR_PACKAGE_ss.Value);
+        //                }
+
+        //                XElement AR_PACKAGE_Frames = AR_PACKAGES_2.Elements().First(p => p.Elements().Any(n => n.Name.LocalName == "SHORT-NAME" && n.Value == "Frame"));  //changed
+        //                XElement Frames_ELEMENTS = AR_PACKAGE_Frames.Elements().First(p => p.Name.LocalName == "ELEMENTS");
+        //                foreach (var CAN_FRAME in Frames_ELEMENTS.Elements())
+        //                {//message name dlc
+        //                    string frame_type = CAN_FRAME.Name.LocalName;
+        //                    if (frame_type == "FLEXRAY-FRAME")
+        //                    {
+        //                        string Flexray_Name = CAN_FRAME.Elements().First(p => p.Name.LocalName == "SHORT-NAME").Value;
+        //                        Console.WriteLine("Flexray_Name: " + Flexray_Name);
+        //                        FlexRay_Message newMsg = new FlexRay_Message();
+        //                        newMsg.Name = Flexray_Name;
+        //                        newMsg.DLC = Convert.ToUInt32(CAN_FRAME.Elements().First(p => p.Name.LocalName == "FRAME-LENGTH").Value);
+        //                        newMsg.Data = new byte[newMsg.DLC];
+        //                        if (CAN_FRAME.Elements().Any(p => p.Name.LocalName == "PDU-TO-FRAME-MAPPINGS"))
+        //                        {
+        //                            XElement PDU_TO_FRAME_MAPPING = CAN_FRAME.Elements().First(p => p.Name.LocalName == "PDU-TO-FRAME-MAPPINGS").Elements().First(p => p.Name.LocalName == "PDU-TO-FRAME-MAPPING");
+        //                            if (PDU_TO_FRAME_MAPPING.Elements().Any(p => p.Name.LocalName == "PDU-REF" && p.FirstAttribute.Value == "I-SIGNAL-I-PDU"))
+        //                            {
+        //                                string PDU_REF = PDU_TO_FRAME_MAPPING.Elements().First(p => p.Name.LocalName == "PDU-REF" && p.FirstAttribute.Value == "I-SIGNAL-I-PDU").Value;
+        //                                newMsg.PDUName = PDU_REF.Split('/').ToList().Last();
+        //                            }
+        //                        }
+        //                        FlexRay_Matrix.Add(newMsg);
+        //                    }
+        //                    else if (frame_type == "CAN-FRAME")
+        //                    {
+        //                        string CAN_Name = CAN_FRAME.Elements().First(p => p.Name.LocalName == "SHORT-NAME").Value;
+        //                        Console.WriteLine("CAN_Name: " + CAN_Name);
+        //                        CAN_Message newMsg = new CAN_Message();
+        //                        newMsg.Name = CAN_Name;
+        //                        newMsg.DLC = Convert.ToUInt32(CAN_FRAME.Elements().First(p => p.Name.LocalName == "FRAME-LENGTH").Value);
+        //                        newMsg.Data = new byte[newMsg.DLC];
+        //                        newMsg.IsLoadBydbc = true;
+        //                        CAN_Matrix.Add(newMsg);
+        //                        if (CAN_FRAME.Elements().Any(p => p.Name.LocalName == "PDU-TO-FRAME-MAPPINGS"))
+        //                        {
+        //                            XElement PDU_TO_FRAME_MAPPING = CAN_FRAME.Elements().First(p => p.Name.LocalName == "PDU-TO-FRAME-MAPPINGS").Elements().First(p => p.Name.LocalName == "PDU-TO-FRAME-MAPPING");
+        //                            if (PDU_TO_FRAME_MAPPING.Elements().Any(p => p.Name.LocalName == "PDU-REF" && p.FirstAttribute.Value == "NM-PDU"))
+        //                            {
+        //                                newMsg.IsNMAsrMesssage = true;
+        //                            }
+        //                        }
+        //                    }
+        //                    else if (frame_type == "LIN-UNCONDITIONAL-FRAME")
+        //                    {
+        //                        string LIN_Name = CAN_FRAME.Elements().First(p => p.Name.LocalName == "SHORT-NAME").Value;
+        //                        Console.WriteLine("LIN_Name: " + LIN_Name);
+        //                        LIN_Message newMsg = new LIN_Message();
+        //                        newMsg.Name = LIN_Name;
+        //                        Lin_Matrix.Add(newMsg);
+        //                    }
+        //                }
+        //                Console.WriteLine("CAN_Matrix Count: " + CAN_Matrix.Count().ToString());
+        //                Console.WriteLine("FlexRay_Matrix Count: " + FlexRay_Matrix.Count().ToString());
+        //                Console.WriteLine("Lin_Matrix Count: " + Lin_Matrix.Count().ToString());
+
+
+        //                XElement AR_PACKAGE_PDUs = AR_PACKAGES_2.Elements().First(p => p.Elements().Any(n => n.Name.LocalName == "SHORT-NAME" && n.Value == "Pdu"));
+        //                XElement PDUs_ELEMENTS = AR_PACKAGE_PDUs.Elements().First(p => p.Name.LocalName == "ELEMENTS");
+        //                foreach (var element in PDUs_ELEMENTS.Elements())
+        //                {//message tx rx
+        //                    if (element.Name.LocalName == "DCM-I-PDU")
+        //                    {
+        //                        string PDU_Name = element.Elements().First(p => p.Name.LocalName == "SHORT-NAME").Value;
+        //                        Console.WriteLine("DCM-I-PDU PDU_Name: " + PDU_Name);
+
+        //                        if (element.Elements().Any(p => p.Name.LocalName == "DIAG-PDU-TYPE"))
+        //                        {
+        //                            if (element.Elements().First(p => p.Name.LocalName == "DIAG-PDU-TYPE").Value == "DIAG-REQUEST")
+        //                            {
+        //                                if (CAN_Matrix.Any(p => p.PDUName == PDU_Name))
+        //                                    CAN_Matrix.First(p => p.PDUName == PDU_Name).TxRx = TxRxType.Rx;
+        //                            }
+        //                            else
+        //                            {
+        //                                if (CAN_Matrix.Any(p => p.PDUName == PDU_Name))
+        //                                    CAN_Matrix.First(p => p.PDUName == PDU_Name).TxRx = TxRxType.Tx;
+        //                            }
+        //                        }
+        //                    }
+        //                    else if (element.Name.LocalName == "I-SIGNAL-I-PDU")
+        //                    {//signal name order startbit
+        //                        string PDU_Name = element.Elements().First(p => p.Name.LocalName == "SHORT-NAME").Value;
+        //                        Console.WriteLine("PDU_Name I-SIGNAL-I-PDU: " + PDU_Name);
+
+        //                        if (element.Elements().Any(p => p.Name.LocalName == "I-PDU-TIMING-SPECIFICATIONS"))
+        //                        {
+        //                            XElement I_PDU_TIMING_SPECIFICATIONS = element.Elements().First(p => p.Name.LocalName == "I-PDU-TIMING-SPECIFICATIONS");
+        //                            if (I_PDU_TIMING_SPECIFICATIONS.Elements().Any(p => p.Name.LocalName == "I-PDU-TIMING"))
+        //                            {
+        //                                XElement I_PDU_TIMING = I_PDU_TIMING_SPECIFICATIONS.Elements().First(p => p.Name.LocalName == "I-PDU-TIMING");
+        //                                if (I_PDU_TIMING.Elements().Any(p => p.Name.LocalName == "TRANSMISSION-MODE-DECLARATION"))
+        //                                {
+        //                                    XElement TRANSMISSION_MODE_DECLARATION = I_PDU_TIMING.Elements().First(p => p.Name.LocalName == "TRANSMISSION-MODE-DECLARATION");
+        //                                    if (TRANSMISSION_MODE_DECLARATION.Elements().Any(p => p.Name.LocalName == "TRANSMISSION-MODE-TRUE-TIMING"))
+        //                                    {
+        //                                        XElement TRANSMISSION_MODE_TRUE_TIMING = TRANSMISSION_MODE_DECLARATION.Elements().First(p => p.Name.LocalName == "TRANSMISSION-MODE-TRUE-TIMING");
+        //                                        if (TRANSMISSION_MODE_TRUE_TIMING.Elements().Any(p => p.Name.LocalName == "CYCLIC-TIMING"))
+        //                                        {
+        //                                            string TIME_PERIOD = TRANSMISSION_MODE_TRUE_TIMING.Elements().First(p => p.Name.LocalName == "CYCLIC-TIMING").
+        //                                            Elements().First(p => p.Name.LocalName == "TIME-PERIOD").
+        //                                            Elements().First(p => p.Name.LocalName == "VALUE").Value;
+        //                                            uint timePeriod = Convert.ToUInt32(Convert.ToDouble(TIME_PERIOD) * 1000);
+        //                                            if (timePeriod == 0)
+        //                                            {
+        //                                                if (CAN_Matrix.Any(p => p.PDUName == PDU_Name))
+        //                                                    CAN_Matrix.First(p => p.PDUName == PDU_Name).Method = Tx_Method.Spontan;
+        //                                            }
+        //                                            else
+        //                                            {
+        //                                                if (CAN_Matrix.Any(p => p.PDUName == PDU_Name))
+        //                                                {
+        //                                                    CAN_Matrix.First(p => p.PDUName == PDU_Name).Method = Tx_Method.Cyclic;
+        //                                                    CAN_Matrix.First(p => p.PDUName == PDU_Name).CycleTime = timePeriod;
+        //                                                }
+        //                                            }
+        //                                        }
+        //                                        else
+        //                                        {
+        //                                            if (CAN_Matrix.Any(p => p.PDUName == PDU_Name))
+        //                                                CAN_Matrix.First(p => p.PDUName == PDU_Name).Method = Tx_Method.Spontan;
+        //                                        }
+        //                                    }
+        //                                }
+        //                            }
+        //                        }
+
+        //                        foreach (var I_SIGNAL_TO_I_PDU_MAPPING in element.Elements().First(p => p.Name.LocalName == "I-SIGNAL-TO-PDU-MAPPINGS").Elements())
+        //                        {
+        //                            if (!I_SIGNAL_TO_I_PDU_MAPPING.Elements().Any(p => p.Name.LocalName == "START-POSITION"))
+        //                                continue;
+
+        //                            if (I_SIGNAL_TO_I_PDU_MAPPING.Elements().Any(p => p.Name.LocalName == "I-SIGNAL-REF"))
+        //                            {
+        //                                string value = I_SIGNAL_TO_I_PDU_MAPPING.Elements().First(p => p.Name.LocalName == "I-SIGNAL-REF").Value;
+
+        //                                CAN_Signal newSignal = new CAN_Signal();
+        //                                newSignal.Name = value.Split('/').ToList().Last();
+        //                                Console.WriteLine("signal Name Value: " + newSignal.Name);
+
+        //                                if (I_SIGNAL_TO_I_PDU_MAPPING.Elements().First(p => p.Name.LocalName == "PACKING-BYTE-ORDER").Value == "MOST-SIGNIFICANT-BYTE-FIRST")
+        //                                {
+        //                                    newSignal.ByteOrder = 0;//Motorola
+        //                                }
+        //                                else
+        //                                {
+        //                                    newSignal.ByteOrder = 1;//Intel
+        //                                }
+
+        //                                newSignal.StartBit = Convert.ToInt32(I_SIGNAL_TO_I_PDU_MAPPING.Elements().First(p => p.Name.LocalName == "START-POSITION").Value);
+
+        //                                if (CAN_Matrix.Any(p => p.PDUName == PDU_Name))
+        //                                {
+        //                                    CAN_Matrix.First(p => p.Name == PDU_Name).Signals.Add(newSignal);
+        //                                    //newSignal.CAN_ID_Ref = CAN_Matrix.First(p => p.Name == CAN_Name).ID;
+        //                                    _SignalList.Add(newSignal);
+        //                                }
+        //                                else if (FlexRay_Matrix.Any(p => p.PDUName == PDU_Name))
+        //                                {
+        //                                    FlexRay_Matrix.First(p => p.Name == PDU_Name).Signals.Add(newSignal);
+        //                                    //newSignal.CAN_ID_Ref = CAN_Matrix.First(p => p.Name == CAN_Name).ID;
+        //                                    _SignalList.Add(newSignal);
+        //                                }
+        //                            }
+        //                        }
+        //                    }
+        //                    else if (element.Name.LocalName == "NM-PDU")
+        //                    {//signal name order startbit
+        //                        string PDU_Name = element.Elements().First(p => p.Name.LocalName == "SHORT-NAME").Value;
+        //                        if (element.Elements().Any(p => p.Name.LocalName == "I-SIGNAL-TO-I-PDU-MAPPINGS"))
+        //                        {
+        //                            foreach (var I_SIGNAL_TO_I_PDU_MAPPING in element.Elements().First(p => p.Name.LocalName == "I-SIGNAL-TO-I-PDU-MAPPINGS").Elements())
+        //                            {
+        //                                CAN_Signal newSignal = new CAN_Signal();
+        //                                newSignal.Name = I_SIGNAL_TO_I_PDU_MAPPING.Elements().First(p => p.Name.LocalName == "SHORT-NAME").Value;
+        //                                if (I_SIGNAL_TO_I_PDU_MAPPING.Elements().First(p => p.Name.LocalName == "PACKING-BYTE-ORDER").Value == "OPAQUE")
+        //                                {
+        //                                    newSignal.ByteOrder = 1;//Intel
+        //                                }
+        //                                else
+        //                                {
+        //                                    newSignal.ByteOrder = 0;//Motorola
+        //                                }
+        //                                newSignal.StartBit = Convert.ToInt32(I_SIGNAL_TO_I_PDU_MAPPING.Elements().First(p => p.Name.LocalName == "START-POSITION").Value);
+        //                                CAN_Matrix.First(p => p.Name == PDU_Name).Signals.Add(newSignal);
+        //                                //newSignal.CAN_ID_Ref = CAN_Matrix.First(p => p.Name == PDU_Name).ID;
+        //                                _SignalList.Add(newSignal);
+        //                            }
+        //                        }
+        //                    }
+        //                    else if (element.Name.LocalName == "I-SIGNAL-I-PDU-GROUP" && element.Elements().Any(p => p.Name.LocalName == "COMMUNICATION-DIRECTION" && p.Value == "IN"))
+        //                    {//message tx rx                               
+        //                        XElement I_SIGNAL_I_PDUS = element.Elements().First(p => p.Name.LocalName == "I-SIGNAL-I-PDUS");
+        //                        foreach (var I_SIGNAL_I_PDU_REF_CONDITIONAL in I_SIGNAL_I_PDUS.Elements())
+        //                        {
+        //                            string PDU_Name = I_SIGNAL_I_PDU_REF_CONDITIONAL.Elements().First(p => p.Name.LocalName == "I-SIGNAL-I-PDU-REF").Value.Split('/').ToList().Last();
+        //                            if (CAN_Matrix.Any(p => p.PDUName == PDU_Name))
+        //                                CAN_Matrix.First(p => p.PDUName == PDU_Name).TxRx = TxRxType.Tx;
+        //                        }
+        //                    }
+        //                    else if (element.Name.LocalName == "I-SIGNAL-I-PDU-GROUP" && element.Elements().Any(p => p.Name.LocalName == "COMMUNICATION-DIRECTION" && p.Value == "OUT"))
+        //                    {//message tx rx
+        //                        XElement I_SIGNAL_I_PDUS = element.Elements().First(p => p.Name.LocalName == "I-SIGNAL-I-PDUS");
+        //                        foreach (var I_SIGNAL_I_PDU_REF_CONDITIONAL in I_SIGNAL_I_PDUS.Elements())
+        //                        {
+        //                            string PDU_Name = I_SIGNAL_I_PDU_REF_CONDITIONAL.Elements().First(p => p.Name.LocalName == "I-SIGNAL-I-PDU-REF").Value.Split('/').ToList().Last();
+        //                            if (CAN_Matrix.Any(p => p.PDUName == PDU_Name))
+        //                                CAN_Matrix.First(p => p.PDUName == PDU_Name).TxRx = TxRxType.Rx;
+        //                        }
+        //                    }
+        //                }
+
+        //                XElement AR_PACKAGE_Signals = AR_PACKAGES_2.Elements().First(p => p.Elements().Any(n => n.Name.LocalName == "SHORT-NAME" && n.Value == "ISignal"));
+        //                XElement Signals_ELEMENTS = AR_PACKAGE_Signals.Elements().First(p => p.Name.LocalName == "ELEMENTS");
+        //                foreach (var element in Signals_ELEMENTS.Elements())
+        //                {//signal length
+        //                    if (element.Name.LocalName == "I-SIGNAL")
+        //                    {
+        //                        string signalName = element.Elements().First(p => p.Name.LocalName == "SHORT-NAME").Value;
+        //                        if (_SignalList.Any(p => p.Name == signalName))
+        //                        {
+        //                            _SignalList.First(p => p.Name == signalName).Length = Convert.ToInt32(element.Elements().First(p => p.Name.LocalName == "LENGTH").Value);
+        //                            _SignalList.First(p => p.Name == signalName).Maximum = (uint)((uint)1 << _SignalList.First(p => p.Name == signalName).Length) - 1;
+        //                        }
+        //                    }
+        //                }
+        //            }
+        //            else if (PACKAGE.Elements().Any(p => p.Name.LocalName == "SHORT-NAME" && p.Value == "CommunicationClusters"))
+        //            {//msg id type
+        //                XElement CommunicationClusters_ELEMENTS = PACKAGE.Elements().First(p => p.Name.LocalName == "ELEMENTS");
+        //                foreach (var element in CommunicationClusters_ELEMENTS.Elements())
+        //                {
+        //                    if (element.Name.LocalName == "FLEXRAY-CLUSTER")
+        //                    {
+        //                        XElement FRAME_TRIGGERINGS = element.Elements().First(p => p.Name.LocalName == "FLEXRAY-CLUSTER-VARIANTS").
+        //                        Elements().First(p => p.Name.LocalName == "FLEXRAY-CLUSTER-CONDITIONAL").Elements().First(p => p.Name.LocalName == "PHYSICAL-CHANNELS").
+        //                        Elements().First(p => p.Name.LocalName == "FLEXRAY-PHYSICAL-CHANNEL").Elements().First(p => p.Name.LocalName == "FRAME-TRIGGERINGS");
+        //                        foreach (var One_FRAME_TRIGGERING in FRAME_TRIGGERINGS.Elements())
+        //                        {
+        //                            string FlexRay_Name = One_FRAME_TRIGGERING.Elements().First(p => p.Name.LocalName == "SHORT-NAME").Value;
+        //                            XElement FLEXRAY_ABSOLUTELY_SCHEDULED_TIMING = One_FRAME_TRIGGERING.Elements().First(p => p.Name.LocalName == "ABSOLUTELY-SCHEDULED-TIMINGS").
+        //                            Elements().First(p => p.Name.LocalName == "FLEXRAY-ABSOLUTELY-SCHEDULED-TIMING");
+        //                            string Frame_ID = FLEXRAY_ABSOLUTELY_SCHEDULED_TIMING.Elements().First(p => p.Name.LocalName == "SLOT-ID").Value;
+        //                            XElement CYCLE_REPETITION = FLEXRAY_ABSOLUTELY_SCHEDULED_TIMING.Elements().First(p => p.Name.LocalName == "COMMUNICATION-CYCLE").
+        //                            Elements().First(p => p.Name.LocalName == "CYCLE-REPETITION");
+        //                            string base_value = CYCLE_REPETITION.Elements().First(p => p.Name.LocalName == "BASE-CYCLE").Value;
+        //                            string repetition = CYCLE_REPETITION.Elements().First(p => p.Name.LocalName == "CYCLE-REPETITION").Value;
+        //                            Console.WriteLine(string.Format("Flexray_Name: {0}, ID:{1}, base: {2}, repetition: {3} ", FlexRay_Name, Frame_ID, base_value, repetition));
+        //                        }
+        //                    }
+        //                    else if (element.Name.LocalName == "CAN-CLUSTER")
+        //                    {
+        //                        XElement FRAME_TRIGGERINGS = element.Elements().First(p => p.Name.LocalName == "CAN-CLUSTER-VARIANTS").
+        //                        Elements().First(p => p.Name.LocalName == "CAN-CLUSTER-CONDITIONAL").Elements().First(p => p.Name.LocalName == "PHYSICAL-CHANNELS").
+        //                        Elements().First(p => p.Name.LocalName == "CAN-PHYSICAL-CHANNEL").Elements().First(p => p.Name.LocalName == "FRAME-TRIGGERINGS");
+        //                        foreach (var One_FRAME_TRIGGERING in FRAME_TRIGGERINGS.Elements())
+        //                        {
+        //                            string CAN_Name = One_FRAME_TRIGGERING.Elements().First(p => p.Name.LocalName == "SHORT-NAME").Value;
+        //                            if (!CAN_Matrix.Any(p => p.Name == CAN_Name))
+        //                                continue;
+
+        //                            bool STANDARD = false;
+        //                            bool CAN20 = false;
+        //                            if (One_FRAME_TRIGGERING.Elements().First(p => p.Name.LocalName == "CAN-ADDRESSING-MODE").Value == "STANDARD")
+        //                                STANDARD = true;
+        //                            else
+        //                                STANDARD = false;
+        //                            if (One_FRAME_TRIGGERING.Elements().First(p => p.Name.LocalName == "CAN-FRAME-TX-BEHAVIOR").Value == "CAN-20")
+        //                                CAN20 = true;
+        //                            else
+        //                                CAN20 = false;
+
+        //                            CAN_Message msg = CAN_Matrix.First(p => p.Name == CAN_Name);
+        //                            string CAN_ID = One_FRAME_TRIGGERING.Elements().First(p => p.Name.LocalName == "IDENTIFIER").Value;
+        //                            msg.ID = Convert.ToUInt32(CAN_ID);
+        //                            if (STANDARD)
+        //                            {
+        //                                if (CAN20)
+        //                                    msg.Type = Message_Type.CAN_Standard;
+        //                                else
+        //                                    msg.Type = Message_Type.CAN_FD_Standard;
+        //                            }
+        //                            else
+        //                            {
+        //                                if (CAN20)
+        //                                    msg.Type = Message_Type.CAN_Extended;
+        //                                else
+        //                                    msg.Type = Message_Type.CAN_FD_Extended;
+        //                            }
+        //                            Console.WriteLine(string.Format("CAN_Name: {0}, ID:{1} ", CAN_Name, CAN_ID));
+        //                        }
+        //                    }
+        //                    else if (element.Name.LocalName == "LIN-CLUSTER")
+        //                    {
+        //                        Console.WriteLine("##############3LIN-CLUSTER");
+        //                    }
+        //                }
+        //            }
+        //            else if (PACKAGE.Elements().Any(p => p.Name.LocalName == "SHORT-NAME" && p.Value == "DataTypes"))
+        //            {
+        //                XElement ELEMENTS = PACKAGE.Elements().First(p => p.Name.LocalName == "AR-PACKAGES").
+        //                    Elements().First(p => p.Elements().Any(n => n.Name.LocalName == "SHORT-NAME" && n.Value == "CompuMethods")).
+        //                    Elements().First(p => p.Name.LocalName == "ELEMENTS");
+        //                foreach (var COMPU_METHOD in ELEMENTS.Elements())
+        //                {
+        //                    string IsignalRef = "I" + COMPU_METHOD.Elements().First(p => p.Name.LocalName == "SHORT-NAME").Value;
+        //                    if (_SignalList.Any(p => p.name_ref == IsignalRef))
+        //                    {
+        //                        CAN_Signal signal = _SignalList.First(p => p.name_ref == IsignalRef);
+        //                        signal.unit = COMPU_METHOD.Elements().First(p => p.Name.LocalName == "UNIT-REF").Value.Split('/')[3];
+        //                        if (COMPU_METHOD.Elements().Any(p => p.Name.LocalName == "CATEGORY" && p.Value == "LINEAR"))
+        //                        {
+        //                            XElement COMPU_SCALE = COMPU_METHOD.Elements().First(p => p.Name.LocalName == "COMPU-INTERNAL-TO-PHYS").
+        //                                Elements().First(p => p.Name.LocalName == "COMPU-SCALES").
+        //                                Elements().First(p => p.Name.LocalName == "COMPU-SCALE");
+        //                            XElement COMPU_RATIONAL_COEFFS = COMPU_SCALE.Elements().First(p => p.Name.LocalName == "COMPU-RATIONAL-COEFFS");
+        //                            string offset = COMPU_RATIONAL_COEFFS.Elements().First(p => p.Name.LocalName == "COMPU-NUMERATOR").Elements().ElementAt(0).Value;
+        //                            string factor = COMPU_RATIONAL_COEFFS.Elements().First(p => p.Name.LocalName == "COMPU-NUMERATOR").Elements().ElementAt(1).Value;
+        //                            signal.Offset = Convert.ToDouble(offset);
+        //                            signal.Factor = Convert.ToDouble(factor);
+        //                            string rawMin = COMPU_SCALE.Elements().First(p => p.Name.LocalName == "LOWER-LIMIT").Value;
+        //                            string rawMax = COMPU_SCALE.Elements().First(p => p.Name.LocalName == "UPPER-LIMIT").Value;
+        //                            if (rawMax.IndexOf("E") > 0)
+        //                            {
+        //                                double decimal1 = Convert.ToDouble(rawMax.Split('E')[0]);
+        //                                double y = Convert.ToDouble(rawMax.Split('E')[1]);
+        //                                double rawmaxdoub = decimal1 * Math.Pow(10, y);
+        //                                signal.Maximum = rawmaxdoub * signal.Factor + signal.Offset;
+        //                            }
+        //                            signal.Minimum = Convert.ToDouble(rawMin);
+        //                        }
+        //                    }
+        //                }
+        //            }
+        //        }
+        //    }
+        //    foreach (var item in CAN_Matrix)
+        //    {
+        //        if ((item.ID & 0x80000000) > 0)
+        //        {
+        //            item.ID = item.ID & 0x7FFFFFFF;
+        //        }
+        //    }
+        //}
+
+        void LoadARXML()
+        {
+            XDocument xd = XDocument.Load(DBCFilePath);
+            XElement xeRoot = xd.Root;
+            IEnumerable<XElement> xemlist = xeRoot.Elements();
+            XElement AR_PACKAGES;
+            if (xeRoot.Elements().Any(p => p.Name.LocalName == "AR-PACKAGES"))
+            {
+                AR_PACKAGES = xeRoot.Elements().First(p => p.Name.LocalName == "AR-PACKAGES");
+                foreach (var PACKAGE in AR_PACKAGES.Elements())
+                {
+                    if (PACKAGE.Elements().Any(p => p.Name.LocalName == "SHORT-NAME" && p.Value == "Communication"))
+                    {
+                        XElement AR_PACKAGES_2 = PACKAGE.Elements().First(p => p.Name.LocalName == "AR-PACKAGES");
+                        XElement AR_PACKAGE_Frames = AR_PACKAGES_2.Elements().First(p => p.Elements().Any(n => n.Name.LocalName == "SHORT-NAME" && n.Value == "Frames"));
+                        XElement Frames_ELEMENTS = AR_PACKAGE_Frames.Elements().First(p => p.Name.LocalName == "ELEMENTS");
+                        foreach (var CAN_FRAME in Frames_ELEMENTS.Elements())
+                        {//message name dlc
+                            string CAN_Name = CAN_FRAME.Elements().First(p => p.Name.LocalName == "SHORT-NAME").Value;
+                            CAN_Message newMsg = new CAN_Message();
+                            newMsg.Name = CAN_Name;
+                            newMsg.DLC = Convert.ToUInt32(CAN_FRAME.Elements().First(p => p.Name.LocalName == "FRAME-LENGTH").Value);
+                            newMsg.Data = new byte[newMsg.DLC];
+                            newMsg.IsLoadBydbc = true;
+                            CAN_Matrix.Add(newMsg);
+                            if (CAN_FRAME.Elements().Any(p => p.Name.LocalName == "PDU-TO-FRAME-MAPPINGS"))
+                            {
+                                XElement PDU_TO_FRAME_MAPPING = CAN_FRAME.Elements().First(p => p.Name.LocalName == "PDU-TO-FRAME-MAPPINGS").Elements().First(p => p.Name.LocalName == "PDU-TO-FRAME-MAPPING");
+                                if (PDU_TO_FRAME_MAPPING.Elements().Any(p => p.Name.LocalName == "PDU-REF" && p.FirstAttribute.Value == "NM-PDU"))
+                                {
+                                    newMsg.IsNMAsrMesssage = true;
+                                }
+                            }
+                        }
+
+                        XElement AR_PACKAGE_PDUs = AR_PACKAGES_2.Elements().First(p => p.Elements().Any(n => n.Name.LocalName == "SHORT-NAME" && n.Value == "PDUs"));
+                        XElement PDUs_ELEMENTS = AR_PACKAGE_PDUs.Elements().First(p => p.Name.LocalName == "ELEMENTS");
+                        foreach (var element in PDUs_ELEMENTS.Elements())
+                        {//message tx rx
+                            if (element.Name.LocalName == "DCM-I-PDU")
+                            {
+                                string CAN_Name = element.Elements().First(p => p.Name.LocalName == "SHORT-NAME").Value;
+                                if (element.Elements().First(p => p.Name.LocalName == "DIAG-PDU-TYPE").Value == "DIAG-REQUEST")
+                                {
+                                    if (CAN_Matrix.Any(p => p.Name == CAN_Name))
+                                        CAN_Matrix.First(p => p.Name == CAN_Name).TxRx = TxRxType.Rx;
+                                }
+                                else
+                                {
+                                    if (CAN_Matrix.Any(p => p.Name == CAN_Name))
+                                        CAN_Matrix.First(p => p.Name == CAN_Name).TxRx = TxRxType.Tx;
+                                }
+                            }
+                            else if (element.Name.LocalName == "I-SIGNAL-I-PDU")
+                            {//signal name order startbit
+                                string CAN_Name = element.Elements().First(p => p.Name.LocalName == "SHORT-NAME").Value;
+                                XElement TRANSMISSION_MODE_TRUE_TIMING = element.Elements().First(p => p.Name.LocalName == "I-PDU-TIMING-SPECIFICATIONS").
+                                Elements().First(p => p.Name.LocalName == "I-PDU-TIMING").
+                                Elements().First(p => p.Name.LocalName == "TRANSMISSION-MODE-DECLARATION").
+                                Elements().First(p => p.Name.LocalName == "TRANSMISSION-MODE-TRUE-TIMING");
+                                if (TRANSMISSION_MODE_TRUE_TIMING.Elements().Any(p => p.Name.LocalName == "CYCLIC-TIMING"))
+                                {
+                                    string TIME_PERIOD = TRANSMISSION_MODE_TRUE_TIMING.Elements().First(p => p.Name.LocalName == "CYCLIC-TIMING").
+                                    Elements().First(p => p.Name.LocalName == "TIME-PERIOD").
+                                    Elements().First(p => p.Name.LocalName == "VALUE").Value;
+                                    uint timePeriod = Convert.ToUInt32(Convert.ToDouble(TIME_PERIOD) * 1000);
+                                    if (timePeriod == 0)
+                                    {
+                                        CAN_Matrix.First(p => p.Name == CAN_Name).Method = Tx_Method.Spontan;
+                                    }
+                                    else
+                                    {
+                                        CAN_Matrix.First(p => p.Name == CAN_Name).Method = Tx_Method.Cyclic;
+                                        CAN_Matrix.First(p => p.Name == CAN_Name).CycleTime = timePeriod;
+                                    }
+                                }
+                                else
+                                {
+                                    if (CAN_Matrix.Any(p => p.Name == CAN_Name))
+                                        CAN_Matrix.First(p => p.Name == CAN_Name).Method = Tx_Method.Spontan;
+                                }
+                                foreach (var I_SIGNAL_TO_I_PDU_MAPPING in element.Elements().First(p => p.Name.LocalName == "I-SIGNAL-TO-PDU-MAPPINGS").Elements())
+                                {
+                                    if (!I_SIGNAL_TO_I_PDU_MAPPING.Elements().Any(p => p.Name.LocalName == "START-POSITION"))
+                                        continue;
+                                    CAN_Signal newSignal = new CAN_Signal();
+                                    newSignal.Name = I_SIGNAL_TO_I_PDU_MAPPING.Elements().First(p => p.Name.LocalName == "SHORT-NAME").Value;
+                                    newSignal.name_ref = I_SIGNAL_TO_I_PDU_MAPPING.Elements().First(p => p.Name.LocalName == "I-SIGNAL-REF").Value.Split('/')[3];
+                                    if (I_SIGNAL_TO_I_PDU_MAPPING.Elements().First(p => p.Name.LocalName == "PACKING-BYTE-ORDER").Value == "MOST-SIGNIFICANT-BYTE-FIRST")
+                                    {
+                                        newSignal.ByteOrder = 0;//Motorola
+                                    }
+                                    else
+                                    {
+                                        newSignal.ByteOrder = 1;//Intel
+                                    }
+                                    newSignal.StartBit = Convert.ToInt32(I_SIGNAL_TO_I_PDU_MAPPING.Elements().First(p => p.Name.LocalName == "START-POSITION").Value);
+                                    if (CAN_Matrix.Any(p => p.Name == CAN_Name))
+                                    {
+                                        CAN_Matrix.First(p => p.Name == CAN_Name).Signals.Add(newSignal);
+                                        newSignal.CAN_ID_Ref = CAN_Matrix.First(p => p.Name == CAN_Name).ID;
+                                        _SignalList.Add(newSignal);
+                                    }
+                                }
+                            }
+                            else if (element.Name.LocalName == "NM-PDU")
+                            {//signal name order startbit
+                                string CAN_Name = element.Elements().First(p => p.Name.LocalName == "SHORT-NAME").Value;
+                                foreach (var I_SIGNAL_TO_I_PDU_MAPPING in element.Elements().First(p => p.Name.LocalName == "I-SIGNAL-TO-I-PDU-MAPPINGS").Elements())
+                                {
+                                    CAN_Signal newSignal = new CAN_Signal();
+                                    newSignal.Name = I_SIGNAL_TO_I_PDU_MAPPING.Elements().First(p => p.Name.LocalName == "SHORT-NAME").Value;
+                                    if (I_SIGNAL_TO_I_PDU_MAPPING.Elements().First(p => p.Name.LocalName == "PACKING-BYTE-ORDER").Value == "OPAQUE")
+                                    {
+                                        newSignal.ByteOrder = 1;//Intel
+                                    }
+                                    else
+                                    {
+                                        newSignal.ByteOrder = 0;//Motorola
+                                    }
+                                    newSignal.StartBit = Convert.ToInt32(I_SIGNAL_TO_I_PDU_MAPPING.Elements().First(p => p.Name.LocalName == "START-POSITION").Value);
+                                    CAN_Matrix.First(p => p.Name == CAN_Name).Signals.Add(newSignal);
+                                    newSignal.CAN_ID_Ref = CAN_Matrix.First(p => p.Name == CAN_Name).ID;
+                                    _SignalList.Add(newSignal);
+                                }
+                            }
+                            else if (element.Name.LocalName == "I-SIGNAL-I-PDU-GROUP" && element.Elements().Any(p => p.Name.LocalName == "COMMUNICATION-DIRECTION" && p.Value == "IN"))
+                            {//message tx rx
+                                XElement I_SIGNAL_I_PDUS = element.Elements().First(p => p.Name.LocalName == "I-SIGNAL-I-PDUS");
+                                foreach (var I_SIGNAL_I_PDU_REF_CONDITIONAL in I_SIGNAL_I_PDUS.Elements())
+                                {
+                                    string CAN_Name = I_SIGNAL_I_PDU_REF_CONDITIONAL.Elements().First(p => p.Name.LocalName == "I-SIGNAL-I-PDU-REF").Value.Split('/')[3];
+                                    if (CAN_Matrix.Any(p => p.Name == CAN_Name))
+                                        CAN_Matrix.First(p => p.Name == CAN_Name).TxRx = TxRxType.Tx;
+                                }
+                            }
+                            else if (element.Name.LocalName == "I-SIGNAL-I-PDU-GROUP" && element.Elements().Any(p => p.Name.LocalName == "COMMUNICATION-DIRECTION" && p.Value == "OUT"))
+                            {//message tx rx
+                                XElement I_SIGNAL_I_PDUS = element.Elements().First(p => p.Name.LocalName == "I-SIGNAL-I-PDUS");
+                                foreach (var I_SIGNAL_I_PDU_REF_CONDITIONAL in I_SIGNAL_I_PDUS.Elements())
+                                {
+                                    string CAN_Name = I_SIGNAL_I_PDU_REF_CONDITIONAL.Elements().First(p => p.Name.LocalName == "I-SIGNAL-I-PDU-REF").Value.Split('/')[3];
+                                    if (CAN_Matrix.Any(p => p.Name == CAN_Name))
+                                        CAN_Matrix.First(p => p.Name == CAN_Name).TxRx = TxRxType.Rx;
+                                }
+                            }
+                        }
+
+                        XElement AR_PACKAGE_Signals = AR_PACKAGES_2.Elements().First(p => p.Elements().Any(n => n.Name.LocalName == "SHORT-NAME" && n.Value == "Signals"));
+                        XElement Signals_ELEMENTS = AR_PACKAGE_Signals.Elements().First(p => p.Name.LocalName == "ELEMENTS");
+                        foreach (var element in Signals_ELEMENTS.Elements())
+                        {//signal length
+                            if (element.Name.LocalName == "I-SIGNAL")
+                            {
+                                string Isignal = element.Elements().First(p => p.Name.LocalName == "SHORT-NAME").Value;
+                                if (_SignalList.Any(p => p.name_ref == Isignal))
+                                {
+                                    _SignalList.First(p => p.name_ref == Isignal).Length = Convert.ToInt32(element.Elements().First(p => p.Name.LocalName == "LENGTH").Value);
+                                    _SignalList.First(p => p.name_ref == Isignal).Maximum = (uint)((uint)1 << _SignalList.First(p => p.name_ref == Isignal).Length) - 1;
+                                }
+                            }
+                        }
+                    }
+                    else if (PACKAGE.Elements().Any(p => p.Name.LocalName == "SHORT-NAME" && p.Value == "Topology"))
+                    {//msg id type
+                        XElement AR_PACKAGES_2 = PACKAGE.Elements().First(p => p.Name.LocalName == "AR-PACKAGES");
+                        XElement AR_PACKAGE_Clusters = AR_PACKAGES_2.Elements().First(p => p.Elements().Any(n => n.Name.LocalName == "SHORT-NAME" && n.Value == "Clusters"));
+                        XElement FRAME_TRIGGERINGS = AR_PACKAGE_Clusters.Elements().First(p => p.Name.LocalName == "ELEMENTS").
+                            Elements().First(p => p.Name.LocalName == "CAN-CLUSTER").Elements().First(p => p.Name.LocalName == "CAN-CLUSTER-VARIANTS").
+                            Elements().First(p => p.Name.LocalName == "CAN-CLUSTER-CONDITIONAL").Elements().First(p => p.Name.LocalName == "PHYSICAL-CHANNELS").
+                            Elements().First(p => p.Name.LocalName == "CAN-PHYSICAL-CHANNEL").Elements().First(p => p.Name.LocalName == "FRAME-TRIGGERINGS");
+                        foreach (var CAN_FRAME_TRIGGERING in FRAME_TRIGGERINGS.Elements())
+                        {
+                            string CAN_Name = CAN_FRAME_TRIGGERING.Elements().First(p => p.Name.LocalName == "SHORT-NAME").Value;
+                            if (!CAN_Matrix.Any(p => p.Name == CAN_Name))
+                                continue;
+                            bool STANDARD = false;
+                            bool CAN20 = false;
+                            if (CAN_FRAME_TRIGGERING.Elements().First(p => p.Name.LocalName == "CAN-ADDRESSING-MODE").Value == "STANDARD")
+                                STANDARD = true;
+                            else
+                                STANDARD = false;
+                            if (CAN_FRAME_TRIGGERING.Elements().First(p => p.Name.LocalName == "CAN-FRAME-TX-BEHAVIOR").Value == "CAN-20")
+                                CAN20 = true;
+                            else
+                                CAN20 = false;
+                            CAN_Message msg = CAN_Matrix.First(p => p.Name == CAN_Name);
+                            msg.ID = Convert.ToUInt32(CAN_FRAME_TRIGGERING.Elements().First(p => p.Name.LocalName == "IDENTIFIER").Value);
+                            if (STANDARD)
+                            {
+                                if (CAN20)
+                                    msg.Type = Message_Type.CAN_Standard;
+                                else
+                                    msg.Type = Message_Type.CAN_FD_Standard;
+                            }
+                            else
+                            {
+                                if (CAN20)
+                                    msg.Type = Message_Type.CAN_Extended;
+                                else
+                                    msg.Type = Message_Type.CAN_FD_Extended;
+                            }
+                        }
+                    }
+                    else if (PACKAGE.Elements().Any(p => p.Name.LocalName == "SHORT-NAME" && p.Value == "DataTypes"))
+                    {
+                        XElement ELEMENTS = PACKAGE.Elements().First(p => p.Name.LocalName == "AR-PACKAGES").
+                            Elements().First(p => p.Elements().Any(n => n.Name.LocalName == "SHORT-NAME" && n.Value == "CompuMethods")).
+                            Elements().First(p => p.Name.LocalName == "ELEMENTS");
+                        foreach (var COMPU_METHOD in ELEMENTS.Elements())
+                        {
+                            string IsignalRef = "I" + COMPU_METHOD.Elements().First(p => p.Name.LocalName == "SHORT-NAME").Value;
+                            if (_SignalList.Any(p => p.name_ref == IsignalRef))
+                            {
+                                CAN_Signal signal = _SignalList.First(p => p.name_ref == IsignalRef);
+                                signal.Unit = COMPU_METHOD.Elements().First(p => p.Name.LocalName == "UNIT-REF").Value.Split('/')[3];
+                                if (COMPU_METHOD.Elements().Any(p => p.Name.LocalName == "CATEGORY" && p.Value == "LINEAR"))
+                                {
+                                    XElement COMPU_SCALE = COMPU_METHOD.Elements().First(p => p.Name.LocalName == "COMPU-INTERNAL-TO-PHYS").
+                                        Elements().First(p => p.Name.LocalName == "COMPU-SCALES").
+                                        Elements().First(p => p.Name.LocalName == "COMPU-SCALE");
+                                    XElement COMPU_RATIONAL_COEFFS = COMPU_SCALE.Elements().First(p => p.Name.LocalName == "COMPU-RATIONAL-COEFFS");
+                                    string offset = COMPU_RATIONAL_COEFFS.Elements().First(p => p.Name.LocalName == "COMPU-NUMERATOR").Elements().ElementAt(0).Value;
+                                    string factor = COMPU_RATIONAL_COEFFS.Elements().First(p => p.Name.LocalName == "COMPU-NUMERATOR").Elements().ElementAt(1).Value;
+                                    signal.Offset = Convert.ToDouble(offset);
+                                    signal.Factor = Convert.ToDouble(factor);
+                                    string rawMin = COMPU_SCALE.Elements().First(p => p.Name.LocalName == "LOWER-LIMIT").Value;
+                                    string rawMax = COMPU_SCALE.Elements().First(p => p.Name.LocalName == "UPPER-LIMIT").Value;
+                                    if (rawMax.IndexOf("E") > 0)
+                                    {
+                                        double decimal1 = Convert.ToDouble(rawMax.Split('E')[0]);
+                                        double y = Convert.ToDouble(rawMax.Split('E')[1]);
+                                        double rawmaxdoub = decimal1 * Math.Pow(10, y);
+                                        signal.Maximum = rawmaxdoub * signal.Factor + signal.Offset;
+                                    }
+                                    signal.Minimum = Convert.ToDouble(rawMin);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            foreach (var item in CAN_Matrix)
+            {
+                if ((item.ID & 0x80000000) > 0)
+                {
+                    item.ID = item.ID & 0x7FFFFFFF;
+                }
+            }
+        }
+        string ByteArrayToString(byte[] data)
+        {
+            if (data == null)
+            {
+                return "";
+            }
+            else
+            {
+                string output = "";
+                for (int i = 0; i < data.Length; i++)
+                {
+                    output = output + data[i].ToString("X");
+                }
+                return output;
+            }
+        }
+        byte[] ByteArrayAddBytes(byte[] data, int count)
+        {
+            if (data == null)
+                return null;
+            if (count == 0)
+                return data;
+            List<byte> b = data.ToList();
+            for (int i = 0; i < count; i++)
+            {
+                b.Add(0);
+            }
+            return b.ToArray();
+        }
+        void UpdateDBCMsg(uint CANid, uint dlc, byte[] data)
+        {
+            try
+            {
+                if (CAN_Matrix.Any(p => p.ID == CANid && p.TxRx == TxRxType.Tx))
+                {
+                    CAN_Message msg = CAN_Matrix.First(p => p.ID == CANid);
+                    if (msg.Method == Tx_Method.Spontan)
+                    {
+                        msg.DLC = dlc;
+                        msg.Data = data;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Logger_Run(string.Format("[exception] Send_CAN_message(uint CANid, uint dlc, byte[] data)\n{0}\n{1}", ex.Message, ex.StackTrace));
+            }
+        }
+        public double hex2Decimal(string str)
+        {
+            if (str.IndexOf('x') != -1)//十六进制
+            {
+                return long.Parse(str.Split('x')[1].ToString().Trim(), NumberStyles.AllowHexSpecifier);
+            }
+            else if (IsDecimal(str))//是否符合十进制格式
+            {
+                return double.Parse(str);
+            }
+            else//没有x的十六进制
+            {
+                return long.Parse(str.ToString().Trim(), NumberStyles.AllowHexSpecifier);
+            }
+        }
+        /// <summary>
+        /// 判断是否十进制格式字符串
+        /// </summary>
+        /// <param name="str">字符串</param>
+        /// <returns>true 是  false 不是</returns>
+        public static bool IsDecimal(string str)
+        {
+            if (str == "")
+                return false;
+            const string PATTERN = @"[0-9-\.]+$";
+            bool sign = false;
+            for (int i = 0; i < str.Length; i++)
+            {
+                sign = System.Text.RegularExpressions.Regex.IsMatch(str[i].ToString(), PATTERN);
+                if (!sign)
+                {
+                    return sign;
+                }
+            }
+            return sign;
+        }
+
+        #endregion
+
+    }
+}
