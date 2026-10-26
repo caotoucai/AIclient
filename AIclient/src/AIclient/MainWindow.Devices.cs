@@ -17,7 +17,7 @@ public partial class MainWindow
                 using var key = Registry.LocalMachine.OpenSubKey(@"HARDWARE\DEVICEMAP\SERIALCOMM");
                 var values = key == null ? [] : key.GetValueNames().Select(n => key.GetValue(n)?.ToString()).OfType<string>().Distinct().OrderBy(v => v).ToArray();
                 DeviceConfig.ShowSerial(values);
-                DeviceConfig.Message(values.Length == 0 ? "未发现本机 COM 口，可手动输入。" : $"发现 {values.Length} 个串口，请选择并绑定。"); return;
+                DeviceConfig.Message(values.Length == 0 ? "未发现本机 COM 口，请检查连接与驱动后刷新。" : $"发现 {values.Length} 个串口，请选择并绑定。"); return;
             }
             if (operation == "scan-visa")
             {
@@ -39,8 +39,9 @@ public partial class MainWindow
                 finally { SetBusy(false); runCancellation.Dispose(); runCancellation = null; if (closeAfterStop) Close(); }
                 return;
             }
-            var config = ReadSettings();
-            if (operation == "save") { settings = config; storage.SaveSettings(settings); FillSettings(); DeviceConfig.Message("设备配置已保存，与高级 JSON 同步。"); return; }
+            if (operation == "save") { SaveScopedSettings("devices"); DeviceConfig.Message("设备配置已保存，与高级 JSON 同步。"); return; }
+            var config = Json.Read<AppSettings>(Json.Serialize(settings));
+            ReadDevicesInto(config); config.Validate();
             Decision? action = operation switch
             {
                 "preflight" => null,

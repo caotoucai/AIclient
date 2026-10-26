@@ -32,6 +32,7 @@ public sealed class CodexBridge(AppSettings settings, Action<string> log, TestSk
         {
             run.Request, run.Plan, settings.ProjectContext, deviceUsage = AdbSlots.UsageGuidance,
             currentStep = new { step.Id, step.Title, step.Expected },
+            previousSteps = run.Steps.TakeWhile(s => s.Id != step.Id).Select(s => new { s.Id, s.Title, s.Outcome, s.Actual, s.EvidenceIds }),
             capabilities = Capabilities(), settings.Commands,
             evidence = observations.Select(e => new { e.Id, e.Kind, e.Role, e.Device, e.Width, e.Height, e.CapturedAt, e.Summary }),
             recentActions = run.Actions.Where(a => a.StepId == step.Id).TakeLast(12)
@@ -42,6 +43,7 @@ public sealed class CodexBridge(AppSettings settings, Action<string> log, TestSk
             每次只提出一个动作 kind=action，工具执行之后你会收到新截图。坐标必须是原图实际像素，不能假定显示缩放。
             当前步骤预期被本轮证据证明时返回 pass；可确认功能不符合预期时 fail；无法继续或缺少证据时 inconclusive。
             结论必须引用当前 evidence 中实际存在的 ID，且 observation 说明可见事实与预期的关系。不能用旧动作成功来代替功能验证。
+            previousSteps 是此前步骤的实际结论，recentActions.observation 是本步骤此前取证时的观察；动作执行成功不等于功能成功。多页核验可保留已观察且后续未改变的进度，不要求不同页面同时可见，也不重复已完成的保存/退出/重入过程；当前最终状态及操作后变化仍须新证据。历史证据 ID 不得冒充当前 evidenceIds。
             arguments 是包含 JSON 对象的字符串。可用工具及参数：
             adb.capture {}；adb.tap {"x":1,"y":2}；adb.swipe {"x1":1,"y1":2,"x2":3,"y2":4,"durationMs":400}；
             adb.key {"key":"BACK|HOME|ENTER|APP_SWITCH|SETTINGS|BLUETOOTH_SETTINGS"}；adb.text {"text":"ASCII text"}；
@@ -51,8 +53,10 @@ public sealed class CodexBridge(AppSettings settings, Action<string> log, TestSk
             ADB 动作的 role 必须是 adb1 或 adb2 且已绑定；其他动作 role 为空。
             pass/fail/inconclusive 的 tool、role 为空，arguments 为 "{}"。不要重复已发生的动作，应先依据当前截图确认状态。
             配对只能选择台架指定的蓝牙名称；无法区分设备时 inconclusive。不要拨打未配置的号码或操作需求范围外的电源。
-            特殊情况可在 lessons 返回最多三条经验，每条含 condition、guidance、evidenceIds，引用本轮证据；无新经验返回空数组。
-            只记录已观察事实及有适用条件的建议，不能将本轮尚未执行的动作写成成功经验，不记录敏感信息和固定坐标。
+            遇到本轮证据可见的额外确认弹窗、权限提示、系统阻塞或开关过渡状态，应在 lessons 记录可复用的识别条件和处理原则，最多三条；没有新特殊情况才返回空数组。
+            每条含 condition、guidance、evidenceIds 并引用本轮真实证据。弹窗已出现即可记录“发现该弹窗时应如何识别和确认”，不必等操作完成，但必须说明建议效果尚待验证。
+            后续新证据确认处理生效时，结合 recentActions 补充经过验证的结果；只引用本轮结果证据，不能伪造前一轮证据 ID 或把未执行的动作写成成功经验。
+            已有匹配经验时优先按当前截图核对弹窗文字和按钮，沿用有条件的处理原则，避免重复试探；经验不授权本次需求外的操作，不记录敏感信息和固定坐标。
             输入上下文：
             """ + Json.Serialize(context);
         return await InvokeAsync<Decision>(run, prompt, DecisionSchema, observations.Where(e => e.Kind == "screenshot").Select(e => Path.Combine(run.Directory, e.Path)), token);

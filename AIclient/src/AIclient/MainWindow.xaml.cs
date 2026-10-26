@@ -1,6 +1,8 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using AIclient.Models;
@@ -24,14 +26,16 @@ public partial class MainWindow : Window
         storage = new Storage(dataRoot);
         skills = new TestSkills(dataRoot);
         try { settings = storage.LoadSettings(); settings.Validate(); } catch (Exception ex) { settings = new(); Log("配置读取失败，已载入默认值（原配置未覆盖）：" + ex.Message); }
-        var bundledAdb = Path.GetFullPath(Path.Combine(dataRoot, "..", "..", "Resource", "ADB", "adb.exe"));
-        if (settings.AdbPath == "adb.exe" && File.Exists(bundledAdb)) settings.AdbPath = bundledAdb;
+        settings.AdbPath = AdbDevice.ResolveExecutable(settings.AdbPath);
         FillSettings();
+        DeviceSettingsView.RequireSelection(BindAdb1Button, AdbScanList);
+        DeviceSettingsView.RequireSelection(BindAdb2Button, AdbScanList);
         DeviceConfig.Requested += DeviceRequested;
         RefreshSkills();
         storage.RecoverInterrupted(); RefreshHistory();
         Log("工作台就绪。演示模式可直接运行；真实模式请先绑定设备并检查 Codex 登录。");
         FooterText.Text = "运行数据：" + dataRoot;
+        InitializeAdbDiscovery();
     }
     private void Dispatch(Action action) { if (Dispatcher.CheckAccess()) action(); else Dispatcher.BeginInvoke(action); }
     private void Log(string message) => Dispatch(() =>
@@ -45,19 +49,46 @@ public partial class MainWindow : Window
         Adb1Box.Text = settings.Adb1Serial; Adb2Box.Text = settings.Adb2Serial; ModelBox.Text = settings.Model; ContextBox.Text = settings.ProjectContext;
         DemoToggle.IsChecked = settings.DemoMode; AdvancedBox.Text = Json.Serialize(settings);
         DeviceConfig.Load(settings); AutoLearnToggle.IsChecked = settings.AutoLearnSkills;
+        AiTimeoutBox.Text = settings.AiTimeoutSeconds.ToString(CultureInfo.InvariantCulture);
+        TaskTimeoutBox.Text = settings.TaskTimeoutMinutes.ToString(CultureInfo.InvariantCulture);
+        MaxActionsBox.Text = settings.MaxActionsPerStep.ToString(CultureInfo.InvariantCulture);
+        MaxAiCallsBox.Text = settings.MaxAiCalls.ToString(CultureInfo.InvariantCulture);
+        UpdateBindingSummary();
+    }
+    private void UpdateBindingSummary()
+    {
         BindingSummary.Text = $"ADB1：{(settings.Adb1Serial.Length == 0 ? "未绑定" : settings.Adb1Serial)}    ADB2：{(settings.Adb2Serial.Length == 0 ? "未绑定" : settings.Adb2Serial)}";
+    }
+    private void ReadAiInto(AppSettings copy)
+    {
+        copy.CodexPath = CodexPathBox.Text.Trim(); copy.PowerShellPath = PowerShellBox.Text.Trim(); copy.Model = ModelBox.Text.Trim();
+        static int Number(TextBox box, string label, int min, int max)
+        {
+            if (!int.TryParse(box.Text, NumberStyles.None, CultureInfo.InvariantCulture, out var value) || value < min || value > max)
+                throw new InvalidDataException($"{label}应为 {min}–{max} 的整数。");
+            return value;
+        }
+        copy.AiTimeoutSeconds = Number(AiTimeoutBox, "单次 AI 超时", 10, 1800);
+        copy.TaskTimeoutMinutes = Number(TaskTimeoutBox, "任务时长", 1, 240);
+        copy.MaxActionsPerStep = Number(MaxActionsBox, "每步动作上限", 1, 100);
+        copy.MaxAiCalls = Number(MaxAiCallsBox, "AI 调用上限", 1, 1000);
+    }
+    private void ReadDevicesInto(AppSettings copy)
+    {
+        copy.AdbPath = AdbPathBox.Text.Trim(); copy.Adb1Serial = Adb1Box.Text.Trim(); copy.Adb2Serial = Adb2Box.Text.Trim();
+        DeviceConfig.ReadInto(copy);
     }
     private AppSettings ReadSettings()
     {
         var copy = Json.Read<AppSettings>(Json.Serialize(settings));
-        copy.CodexPath = CodexPathBox.Text.Trim(); copy.PowerShellPath = PowerShellBox.Text.Trim(); copy.AdbPath = AdbPathBox.Text.Trim();
-        copy.Adb1Serial = Adb1Box.Text.Trim(); copy.Adb2Serial = Adb2Box.Text.Trim(); copy.Model = ModelBox.Text.Trim(); copy.ProjectContext = ContextBox.Text;
-        DeviceConfig.ReadInto(copy);
+        ReadAiInto(copy); ReadDevicesInto(copy); copy.ProjectContext = ContextBox.Text;
         copy.DemoMode = DemoToggle.IsChecked == true; copy.AutoLearnSkills = AutoLearnToggle.IsChecked == true; copy.Validate(); return copy;
     }
     private void SetBusy(bool value)
     {
         busy = value; StartButton.IsEnabled = !value; DemoToggle.IsEnabled = !value; RequestBox.IsReadOnly = value; SettingsPanel.IsEnabled = !value;
+        UpdateAdbDiscovery();
+        BenchPanel.IsEnabled = !value; AiConfigPanel.IsEnabled = !value; AdvancedPanel.IsEnabled = !value;
         PauseButton.IsEnabled = value; StopButton.IsEnabled = value; PauseButton.Content = "暂停";
         StatusBadge.Text = value ? "●  任务执行中" : current?.Finished != null ? "●  " + Report.Label(current.Outcome) + (current.Demo ? " · 演示" : " · 真实设备") : "●  本地工作台就绪";
     }
@@ -108,11 +139,27 @@ public partial class MainWindow : Window
     private void StopClick(object sender, RoutedEventArgs e) { runCancellation?.Cancel(); StopButton.IsEnabled = false; Log("已请求停止，正在收尾并保留证据…"); }
     private void SaveSettingsClick(object sender, RoutedEventArgs e)
     {
-        try { settings = ReadSettings(); storage.SaveSettings(settings); FillSettings(); SettingsMessage.Text = "已保存到本地"; } catch (Exception ex) { SettingsMessage.Text = ex.Message; }
+        var scope = (sender as FrameworkElement)?.Tag as string ?? "devices";
+        var message = scope == "ai" ? AiSettingsMessage : scope == "bench" ? BenchMessage : SettingsMessage;
+        try { SaveScopedSettings(scope); message.Text = "已保存到本地"; } catch (Exception ex) { message.Text = ex.Message; }
+    }
+    private void SaveScopedSettings(string scope)
+    {
+        if (busy) throw new InvalidOperationException("任务运行中不能修改运行配置。");
+        var copy = Json.Read<AppSettings>(Json.Serialize(settings));
+        switch (scope)
+        {
+            case "ai": ReadAiInto(copy); break;
+            case "bench": copy.ProjectContext = ContextBox.Text; break;
+            case "devices": ReadDevicesInto(copy); break;
+            default: throw new InvalidOperationException("未知设置页面。");
+        }
+        copy.Validate(); storage.SaveSettings(copy); settings = copy;
+        AdvancedBox.Text = Json.Serialize(settings); UpdateBindingSummary();
     }
     private void ApplyJsonClick(object sender, RoutedEventArgs e)
     {
-        try { var parsed = Json.Read<AppSettings>(AdvancedBox.Text); parsed.Validate(); settings = parsed; storage.SaveSettings(settings); FillSettings(); SettingsMessage.Text = "JSON 设置已应用"; } catch (Exception ex) { SettingsMessage.Text = "JSON 无效：" + ex.Message; }
+        try { var parsed = Json.Read<AppSettings>(AdvancedBox.Text); parsed.Validate(); storage.SaveSettings(parsed); settings = parsed; FillSettings(); AdvancedMessage.Text = "完整配置已应用到所有页面"; } catch (Exception ex) { AdvancedMessage.Text = "JSON 无效：" + ex.Message; }
     }
     private void ExampleClick(object sender, RoutedEventArgs e)
     {
@@ -120,34 +167,38 @@ public partial class MainWindow : Window
         example.SerialPorts = [new() { Name = "serial1", Port = "COM3", Enabled = false }, new() { Name = "power", Port = "COM4", BaudRate = 9600, Enabled = false }];
         example.Commands = [new() { Alias = "query_status", Description = "请替换成实际设备协议后再启用通道", Channel = "serial1", Payload = "STATUS?" }, new() { Alias = "example_can", Description = "仅为格式示例，须按真实项目修改", Transport = "bus", Payload = "t1232AABB" }];
         example.Bus.Serial.Port = "COM5";
-        AdvancedBox.Text = Json.Serialize(example); SettingsMessage.Text = "示例已载入编辑器，通道保持关闭；修改后应用。";
-    }
-    private async void ScanClick(object sender, RoutedEventArgs e)
-    {
-        try { var result = await new AdbDevice(ReadSettings()).ScanAsync(CancellationToken.None); AdbScanList.ItemsSource = result.Split('\n').Select(s => s.Trim()).Where(s => s.Length > 0 && !s.StartsWith("List of devices")).ToList(); SettingsMessage.Text = "扫描完成；选择在线设备并绑定到 ADB1 或 ADB2，设备类型不限。"; }
-        catch (Exception ex) { SettingsMessage.Text = "ADB 扫描失败：" + ex.Message; }
+        AdvancedBox.Text = Json.Serialize(example); AdvancedMessage.Text = "示例已载入编辑器，通道保持关闭；修改后应用。";
     }
     private void BindAdb1Click(object sender, RoutedEventArgs e) => Bind(true);
     private void BindAdb2Click(object sender, RoutedEventArgs e) => Bind(false);
     private void Bind(bool firstSlot)
     {
+        if (busy) return;
         if (AdbScanList.SelectedItem is not string line) { SettingsMessage.Text = "请先扫描并选择设备。"; return; }
         var parts = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length < 2 || parts[1] != "device") { SettingsMessage.Text = "只能绑定已授权、在线的 ADB 设备。"; return; }
-        if (firstSlot) Adb1Box.Text = parts[0]; else Adb2Box.Text = parts[0]; SettingsMessage.Text = "已填写绑定，请保存基础设置。";
+        if (parts[0] == (firstSlot ? Adb2Box.Text : Adb1Box.Text)) { SettingsMessage.Text = "该设备已绑定到另一个 ADB 通道，请先解绑。"; return; }
+        if (firstSlot) Adb1Box.Text = parts[0]; else Adb2Box.Text = parts[0]; SettingsMessage.Text = "已绑定，请保存设备配置。";
+    }
+    private void UnbindAdbClick(object sender, RoutedEventArgs e)
+    {
+        if (busy) return;
+        if ((string)((Button)sender).Tag == "adb1") Adb1Box.Clear(); else Adb2Box.Clear();
+        SettingsMessage.Text = "已解绑，请保存设备配置。";
     }
     private async void CheckCodexClick(object sender, RoutedEventArgs e)
     {
         try
         {
-            var config = ReadSettings();
+            var config = Json.Read<AppSettings>(Json.Serialize(settings));
+            config.PowerShellPath = PowerShellBox.Text.Trim(); config.CodexPath = CodexPathBox.Text.Trim();
             // 固定脚本通过位置参数调用，不将输入拼接进 PowerShell 源码。
             var script = Path.Combine(storage.Root, "check-codex.ps1");
             File.WriteAllText(script, "param([string]$CodexPath)\n$ErrorActionPreference='Stop'\n& $CodexPath --version\n& $CodexPath login status\nexit $LASTEXITCODE\n");
             var r = await ProcessRunner.RunAsync(config.PowerShellPath, ["-NoProfile", "-NonInteractive", "-File", script, "-CodexPath", config.CodexPath], 20, CancellationToken.None);
-            SettingsMessage.Text = (r.ExitCode == 0 ? "Codex 检查完成：" : "Codex 检查未通过：") + r.Output.Trim() + " " + r.Error.Trim();
+            CodexMessage.Text = (r.ExitCode == 0 ? "Codex 检查完成：" : "Codex 检查未通过：") + r.Output.Trim() + " " + r.Error.Trim();
         }
-        catch (Exception ex) { SettingsMessage.Text = ex.Message; }
+        catch (Exception ex) { CodexMessage.Text = ex.Message; }
     }
     private void ReportClick(object sender, RoutedEventArgs e) { if (current != null) OpenPath(Path.Combine(current.Directory, "report.html")); }
     private void FolderClick(object sender, RoutedEventArgs e) { if (current != null) OpenPath(current.Directory); }
@@ -163,12 +214,22 @@ public partial class MainWindow : Window
     }
     public async void StartSmoke()
     {
+        adbDiscoverySuspended = true; CancelAdbDiscovery();
+        try { await RunSmokeAsync(); }
+        catch (Exception ex)
+        {
+            Storage.WriteJson(Path.Combine(storage.Root, "ui-smoke.json"), new { success = false, error = ex.ToString() });
+            Close();
+        }
+    }
+    private async Task RunSmokeAsync()
+    {
         await Task.Delay(500); DemoToggle.IsChecked = true;
         var result = await RunTaskAsync();
         await Task.Delay(300);
         var path = Path.Combine(storage.Root, "ui-smoke.png");
         SaveWindowScreenshot(path);
-        Tabs.SelectedIndex = 1;
+        Tabs.SelectedItem = DevicesTab;
         await Task.Delay(250);
         var settingsPath = Path.Combine(storage.Root, "settings-smoke.png");
         SaveWindowScreenshot(settingsPath);
@@ -181,6 +242,10 @@ public partial class MainWindow : Window
         var roundtrip = new AppSettings(); DeviceConfig.ReadInto(roundtrip);
         var deviceRoundtrip = roundtrip.SerialPorts.Count == 2 && roundtrip.Bus.Protocol == "CAN FD" && roundtrip.Power.MeasurementResource == sample.Power.MeasurementResource && roundtrip.Commands.Single().Alias == "query_status";
         var deviceBindingChecks = DeviceConfig.CheckBindingWorkflow(sample);
+        var settingsChecks = CheckSettingsWorkflow();
+        var adbDiscoveryChecks = await CheckAdbDiscoveryAsync();
+        DeviceConfig.Load(sample);
+        AdbExpander.IsExpanded = false;
         for (var section = 0; section < 4; section++)
         {
             DeviceConfig.ShowSection(section); await Task.Delay(150);
@@ -194,10 +259,26 @@ public partial class MainWindow : Window
             SaveWindowScreenshot(Path.Combine(storage.Root, $"device-narrow-{section}.png"));
         }
         Width = originalWidth; Height = originalHeight;
-        Tabs.SelectedIndex = 2;
+        Tabs.SelectedItem = BenchTab;
+        await Task.Delay(200);
+        SaveWindowScreenshot(Path.Combine(storage.Root, "bench-smoke.png"));
+        Tabs.SelectedItem = AiTab; AiTabs.SelectedItem = CodexTab;
+        await Task.Delay(200);
+        SaveWindowScreenshot(Path.Combine(storage.Root, "ai-settings-smoke.png"));
+        AiTabs.SelectedItem = SkillsTab;
         await Task.Delay(250);
         var skillsPath = Path.Combine(storage.Root, "skills-smoke.png"); SaveWindowScreenshot(skillsPath);
-        Storage.WriteJson(Path.Combine(storage.Root, "ui-smoke.json"), new { success = result?.Outcome == Outcome.Passed && deviceRoundtrip, deviceRoundtrip, deviceBindingChecks, screenshot = path, settingsScreenshot = settingsPath, skillsScreenshot = skillsPath, report = result == null ? "" : Path.Combine(result.Directory, "report.html") });
+        var wideWidth = Width; var wideHeight = Height;
+        Width = MinWidth; Height = MinHeight;
+        foreach (var tab in new[] { CodexTab, SkillsTab, AdvancedTab })
+        {
+            AiTabs.SelectedItem = tab; await Task.Delay(200);
+            SaveWindowScreenshot(Path.Combine(storage.Root, $"ai-narrow-{tab.Name}.png"));
+        }
+        Tabs.SelectedItem = BenchTab; await Task.Delay(200);
+        SaveWindowScreenshot(Path.Combine(storage.Root, "bench-narrow.png"));
+        Width = wideWidth; Height = wideHeight;
+        Storage.WriteJson(Path.Combine(storage.Root, "ui-smoke.json"), new { success = result?.Outcome == Outcome.Passed && deviceRoundtrip, deviceRoundtrip, deviceBindingChecks, settingsChecks, adbDiscoveryChecks, screenshot = path, settingsScreenshot = settingsPath, skillsScreenshot = skillsPath, report = result == null ? "" : Path.Combine(result.Directory, "report.html") });
         Close();
     }
     private void SaveWindowScreenshot(string path)

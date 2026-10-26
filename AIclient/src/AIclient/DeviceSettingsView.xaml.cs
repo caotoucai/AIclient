@@ -27,7 +27,7 @@ public partial class DeviceSettingsView : UserControl
         AdapterBox.ItemsSource = new[] { new Choice("串口 CAN", "SLCAN"), new Choice("厂商设备", "Legacy") };
         ProtocolBox.ItemsSource = new[] { "CAN", "CAN FD", "LIN", "FlexRay" };
         PowerTransportBox.ItemsSource = new[] { new Choice("串口设备", "serial"), new Choice("VISA 仪器", "visa") };
-        SerialBaudBox.ItemsSource = new[] { 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600 };
+        SerialBaudBox.ItemsSource = new[] { 300, 600, 1200, 2400, 4800, 9600, 14400, 19200, 38400, 57600, 115200, 230400, 460800, 921600 };
         SerialDataBox.ItemsSource = new[] { 5, 6, 7, 8 };
         SerialParityBox.ItemsSource = new[] { "None", "Odd", "Even" };
         SerialStopBox.ItemsSource = new[] { 1, 2 };
@@ -36,12 +36,28 @@ public partial class DeviceSettingsView : UserControl
         FdBaudBox.ItemsSource = new[] { 500000, 1000000, 2000000, 4000000, 5000000, 8000000 };
         LinBaudBox.ItemsSource = new[] { "Baud_2400", "Baud_9600", "Baud_10400", "Baud_10417", "Baud_19200", "Baud_20000" };
         LinVersionBox.ItemsSource = new[] { "LIN_1_3", "LIN_2_0", "LIN_2_1", "J2602_0_0", "J2602_1_2", "J2602_1_1" };
+        RequireSelection(BindSerialButton, SerialAvailableBox);
+        RequireSelection(BindPowerButton, PowerAvailableBox);
+        RequireSelection(BindMeterButton, PowerAvailableBox);
+        RequireSelection(BindBusButton, BusAvailableBox);
+    }
+
+    internal static void RequireSelection(Button button, ComboBox selector)
+    {
+        var style = new Style(typeof(Button), (Style)button.FindResource(typeof(Button)));
+        var empty = new DataTrigger { Binding = new Binding(nameof(ComboBox.SelectedItem)) { Source = selector }, Value = null };
+        empty.Setters.Add(new Setter(IsEnabledProperty, false)); style.Triggers.Add(empty); button.Style = style;
     }
 
     public void Load(AppSettings settings)
     {
         loading = true;
         var draft = Json.Read<AppSettings>(Json.Serialize(settings));
+        SerialEditor.DataContext = null; DataContext = null;
+        // Existing project-specific rates stay selectable when loading older configurations.
+        IncludeRates(SerialBaudBox, draft.SerialPorts.Select(p => p.BaudRate));
+        IncludeRates(CanBaudBox, [draft.Bus.BitRate]);
+        IncludeRates(FdBaudBox, [draft.Bus.DataRate]);
         DataContext = draft;
         ports = new(draft.SerialPorts); commands = new(draft.Commands);
         SerialGrid.ItemsSource = ports; CommandsGrid.ItemsSource = commands;
@@ -49,6 +65,9 @@ public partial class DeviceSettingsView : UserControl
         RefreshPower(); RefreshBus();
         SerialGrid.SelectedIndex = ports.Count > 0 ? 0 : -1;
     }
+
+    private static void IncludeRates(ComboBox box, IEnumerable<int> rates) =>
+        box.ItemsSource = box.Items.Cast<int>().Concat(rates).Distinct().Order().ToArray();
 
     public void ReadInto(AppSettings target)
     {
@@ -121,8 +140,8 @@ public partial class DeviceSettingsView : UserControl
     private void BindSerialClick(object sender, RoutedEventArgs e)
     {
         if (!TryCommit()) return;
-        var value = SerialAvailableBox.Text.Trim().ToUpperInvariant();
-        if (!IsCom(value)) { Message("请先刷新并选择串口，或输入 COM 口名称。"); return; }
+        var value = (SerialAvailableBox.SelectedItem as string ?? "").ToUpperInvariant();
+        if (!IsCom(value)) { Message("请先刷新并选择可用串口。"); return; }
         var selected = SerialGrid.SelectedItem as SerialConfig;
         if (ports.Any(p => p != selected && p.Enabled && p.Port.Equals(value, StringComparison.OrdinalIgnoreCase))) { Message("该串口已绑定其他启用的通道。"); return; }
         selected ??= NewSerial(); selected.Port = value; selected.Enabled = true;
@@ -166,7 +185,7 @@ public partial class DeviceSettingsView : UserControl
     private void BindPowerClick(object sender, RoutedEventArgs e)
     {
         if (!TryCommit()) return;
-        var value = PowerAvailableBox.Text.Trim(); var meter = (string)((Button)sender).Tag == "meter";
+        var value = PowerAvailableBox.SelectedItem as string ?? ""; var meter = (string)((Button)sender).Tag == "meter";
         if (value.Length == 0) { Message("请先选择设备。"); return; }
         if (Visa)
         {
@@ -223,8 +242,8 @@ public partial class DeviceSettingsView : UserControl
     private void BindBusClick(object sender, RoutedEventArgs e)
     {
         if (!TryCommit()) return;
-        var value = BusAvailableBox.Text.Trim();
-        if (value.Length == 0 || (!Legacy && !IsCom(value))) { Message("请刷新并选择设备，串口 CAN 也可直接输入 COM 口。"); return; }
+        var value = BusAvailableBox.SelectedItem as string ?? "";
+        if (value.Length == 0 || (!Legacy && !IsCom(value))) { Message("请刷新并选择可用设备。"); return; }
         if (Legacy) Draft.Bus.DeviceName = value; else Draft.Bus.Serial.Port = value.ToUpperInvariant();
         Draft.Bus.Enabled = true; RefreshBus(); Message("已绑定总线通道，保存设置后生效。");
     }
@@ -243,14 +262,16 @@ public partial class DeviceSettingsView : UserControl
     }
     private static void SetAvailable(ComboBox box, string[] values, string fallback)
     {
-        var previous = box.Text;
-        box.ItemsSource = values.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        box.Text = values.Contains(previous, StringComparer.OrdinalIgnoreCase) ? previous
-            : values.Contains(fallback, StringComparer.OrdinalIgnoreCase) ? fallback : values.FirstOrDefault() ?? fallback;
+        var previous = box.SelectedItem as string;
+        var choices = values.Where(v => !string.IsNullOrWhiteSpace(v)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        box.ItemsSource = choices;
+        box.SelectedItem = choices.FirstOrDefault(v => v.Equals(previous, StringComparison.OrdinalIgnoreCase))
+            ?? choices.FirstOrDefault(v => v.Equals(fallback, StringComparison.OrdinalIgnoreCase))
+            ?? choices.FirstOrDefault();
     }
     public void ShowSerial(string[] values)
     {
-        serialDevices = values; SetAvailable(SerialAvailableBox, values, SerialAvailableBox.Text);
+        serialDevices = values; SetAvailable(SerialAvailableBox, values, SerialAvailableBox.SelectedItem as string ?? "");
         if (!Legacy) RefreshBus(); if (!Visa) RefreshPower();
     }
     public void ShowVisa(string[] values) { visaDevices = values; if (Visa) RefreshPower(); }

@@ -6,6 +6,22 @@ namespace AIclient.Services;
 
 public sealed class AdbDevice(AppSettings settings)
 {
+    // Prefer the private SDK, including migration from the repository's legacy default.
+    public static string ResolveExecutable(string configured, string? searchRoot = null)
+    {
+        var bare = configured.Equals("adb.exe", StringComparison.OrdinalIgnoreCase);
+        for (var dir = new DirectoryInfo(searchRoot ?? AppContext.BaseDirectory); dir != null; dir = dir.Parent)
+        {
+            var modern = Path.Combine(dir.FullName, "tools", "platform-tools", "adb.exe");
+            var project = dir.Parent?.FullName ?? dir.FullName;
+            var legacy = new[] { Path.Combine(project, "adb.exe"), Path.Combine(project, "Resource", "ADB", "adb.exe") };
+            if (File.Exists(modern) && (bare || legacy.Any(p => Path.GetFullPath(configured).Equals(p, StringComparison.OrdinalIgnoreCase)))) return modern;
+            if (bare)
+                foreach (var candidate in new[] { Path.Combine(dir.FullName, "adb.exe"), Path.Combine(dir.FullName, "Resource", "ADB", "adb.exe") })
+                    if (File.Exists(candidate)) return candidate;
+        }
+        return configured;
+    }
     public string Serial(string role)
     {
         var slot = AdbSlots.Normalize(role);
@@ -14,7 +30,9 @@ public sealed class AdbDevice(AppSettings settings)
     }
     public async Task<string> ScanAsync(CancellationToken token)
     {
-        var r = await ProcessRunner.RunAsync(settings.AdbPath, ["devices", "-l"], 20, token);
+        var executable = ResolveExecutable(settings.AdbPath);
+        await AdbServer.Shared.EnsureAsync(executable, token);
+        var r = await ProcessRunner.RunAsync(executable, ["devices", "-l"], 3, token);
         Check(r); return r.Output;
     }
     public async Task CheckAsync(string role, CancellationToken token)
@@ -24,7 +42,9 @@ public sealed class AdbDevice(AppSettings settings)
     }
     public async Task<string> CommandAsync(string role, IEnumerable<string> args, CancellationToken token)
     {
-        var r = await ProcessRunner.RunAsync(settings.AdbPath, new[] { "-s", Serial(role) }.Concat(args), 25, token);
+        var executable = ResolveExecutable(settings.AdbPath);
+        await AdbServer.Shared.EnsureAsync(executable, token);
+        var r = await ProcessRunner.RunAsync(executable, new[] { "-s", Serial(role) }.Concat(args), 25, token);
         Check(r); return r.Output;
     }
     public async Task<(int width, int height)> CaptureAsync(string role, string destination, CancellationToken token)

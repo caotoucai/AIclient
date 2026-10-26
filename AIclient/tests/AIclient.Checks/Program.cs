@@ -23,6 +23,98 @@ var checks = new List<string>();
 void Assert(bool value, string name) { if (!value) throw new Exception("FAILED: " + name); checks.Add(name); Console.WriteLine("PASS " + name); }
 void Rejected(Action action, string name) { try { action(); } catch (InvalidDataException) { Assert(true, name); return; } throw new Exception("FAILED, not rejected: " + name); }
 
+var adbResolutionRoot = Path.Combine(root, "adb-path-resolution", Guid.NewGuid().ToString("N"));
+var adbNestedRoot = Path.Combine(adbResolutionRoot, "AIclient", "bin"); Directory.CreateDirectory(adbNestedRoot);
+var adbBundledRoot = Path.Combine(adbResolutionRoot, "Resource", "ADB"); Directory.CreateDirectory(adbBundledRoot);
+var adbBundledPath = Path.Combine(adbBundledRoot, "adb.exe"); File.WriteAllText(adbBundledPath, "path resolution fixture, never executed");
+Assert(AdbDevice.ResolveExecutable("ADB.EXE", adbNestedRoot) == adbBundledPath, "Bare ADB uses the bundled project executable before PATH");
+var rootAdbPath = Path.Combine(adbResolutionRoot, "adb.exe"); File.WriteAllText(rootAdbPath, "path resolution fixture, never executed");
+Assert(AdbDevice.ResolveExecutable("adb.exe", adbNestedRoot) == rootAdbPath, "Root adb.exe takes precedence over Resource/ADB at the same project root");
+Assert(AdbDevice.ResolveExecutable(@"C:\custom-tools\adb.exe", adbNestedRoot) == @"C:\custom-tools\adb.exe", "An explicit ADB path is preserved for scanning and device commands");
+var privateSdk = Path.Combine(adbResolutionRoot, "AIclient", "tools", "platform-tools");
+Directory.CreateDirectory(privateSdk);
+var privateAdb = Path.Combine(privateSdk, "adb.exe"); File.WriteAllText(privateAdb, "not executed");
+File.WriteAllText(Path.Combine(privateSdk, "source.properties"), "Pkg.Revision=37.0.1");
+Assert(AdbDevice.ResolveExecutable("adb.exe", adbNestedRoot) == privateAdb, "Private SDK is preferred to the old root ADB");
+Assert(AdbDevice.ResolveExecutable(adbBundledPath, adbNestedRoot) == privateAdb, "Legacy bundled ADB settings migrate to the private SDK");
+Assert(AdbDevice.ResolveExecutable(@"C:\custom-tools\adb.exe", adbNestedRoot) == @"C:\custom-tools\adb.exe", "Private SDK does not replace an unrelated explicit user path");
+
+var adbCalls = new List<string>(); var oldServer = true;
+var serverStatus = "executable_absolute_path: " + System.Text.Json.JsonSerializer.Serialize(privateAdb) + "\n";
+var adbServer = new AdbServer((_, command) =>
+{
+    adbCalls.Add(command[0]);
+    if (command[0] == "kill-server") oldServer = false;
+    return Task.FromResult(command[0] == "server-status"
+        ? oldServer ? new ProcessResult(1, "", "error: unknown host service") : new ProcessResult(0, serverStatus, "")
+        : new ProcessResult(0, command[0] == "devices" ? "List of devices attached\n" : "", ""));
+});
+await adbServer.EnsureAsync(privateAdb, CancellationToken.None);
+Assert(adbCalls.SequenceEqual(new[] { "start-server", "server-status", "kill-server", "start-server", "server-status" }),
+    "Protocol-compatible old daemon is replaced and the actual server executable is verified");
+var initializedCallCount = adbCalls.Count;
+await adbServer.EnsureAsync(privateAdb, CancellationToken.None);
+Assert(adbCalls.Count == initializedCallCount, "Healthy server initialization is reused without repeated restarts");
+Assert(await adbServer.RecoverEmptyUsbAsync(privateAdb, CancellationToken.None)
+    && adbCalls.Skip(initializedCallCount).SequenceEqual(new[] { "devices", "kill-server", "start-server", "server-status" }),
+    "Empty USB recovery rechecks the list and restarts using the verified SDK");
+var recoveryCallCount = adbCalls.Count;
+Assert(!await adbServer.RecoverEmptyUsbAsync(privateAdb, CancellationToken.None) && adbCalls.Count == recoveryCallCount,
+    "USB recovery cooldown prevents repeated server restarts");
+var protectedCalls = new List<string>();
+var protectedServer = new AdbServer((_, command) =>
+{
+    protectedCalls.Add(command[0]);
+    return Task.FromResult(new ProcessResult(0, "List of devices attached\nphone-a unauthorized\n", ""));
+});
+Assert(!await protectedServer.RecoverEmptyUsbAsync(privateAdb, CancellationToken.None) && protectedCalls.SequenceEqual(new[] { "devices" }),
+    "A listed unauthorised device prevents server restart");
+
+var atomicCalls = new List<string>();
+var stoppedServer = new TaskCompletionSource<ProcessResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+var atomicServer = new AdbServer((_, command) =>
+{
+    atomicCalls.Add(command[0]);
+    return command[0] == "kill-server" ? stoppedServer.Task
+        : Task.FromResult(new ProcessResult(0, command[0] == "server-status" ? serverStatus : "List of devices attached\n", ""));
+});
+using (var stopWait = new CancellationTokenSource())
+{
+    var recovering = atomicServer.RecoverEmptyUsbAsync(privateAdb, stopWait.Token);
+    stopWait.Cancel();
+    var refreshWaitCancelled = false;
+    try { await recovering; } catch (OperationCanceledException) { refreshWaitCancelled = true; }
+    stoppedServer.SetResult(new ProcessResult(0, "", ""));
+    await atomicServer.EnsureAsync(privateAdb, CancellationToken.None);
+    Assert(refreshWaitCancelled && atomicCalls.IndexOf("start-server") > atomicCalls.IndexOf("kill-server"),
+        "Cancelling a refresh does not leave the shared ADB server stopped");
+}
+
+var usbClock = DateTimeOffset.UtcNow;
+var usbPresent = false; var usbRows = "List of devices attached\n"; var usbRecoveries = 0;
+var usbDiscovery = new AdbUsbDiscovery((_, _) => Task.FromResult(usbRows), () => usbPresent,
+    (_, _) => { usbRecoveries++; return Task.FromResult(true); }, () => usbClock);
+await usbDiscovery.ScanAsync(privateAdb, CancellationToken.None);
+usbClock += TimeSpan.FromSeconds(5);
+await usbDiscovery.ScanAsync(privateAdb, CancellationToken.None);
+Assert(usbRecoveries == 0, "Unplugged USB never triggers server recovery");
+usbPresent = true;
+await usbDiscovery.ScanAsync(privateAdb, CancellationToken.None);
+usbClock += TimeSpan.FromSeconds(1);
+await usbDiscovery.ScanAsync(privateAdb, CancellationToken.None);
+Assert(usbRecoveries == 0, "A newly arrived USB interface gets a handshake interval before recovery");
+usbClock += TimeSpan.FromSeconds(2);
+await usbDiscovery.ScanAsync(privateAdb, CancellationToken.None);
+await usbDiscovery.ScanAsync(privateAdb, CancellationToken.None);
+Assert(usbRecoveries == 1, "Present USB with a persistently empty ADB list triggers one recovery per episode");
+usbRows += "phone-a device\n";
+await usbDiscovery.ScanAsync(privateAdb, CancellationToken.None);
+usbRows = "List of devices attached\n"; usbPresent = false;
+await usbDiscovery.ScanAsync(privateAdb, CancellationToken.None);
+usbPresent = true; await usbDiscovery.ScanAsync(privateAdb, CancellationToken.None);
+usbClock += TimeSpan.FromSeconds(3); await usbDiscovery.ScanAsync(privateAdb, CancellationToken.None);
+Assert(usbRecoveries == 2, "A subsequent physical-interface arrival can start a new bounded recovery episode");
+
 var little = new DbcSignal(0x123, false, "rpm", 0, 16, true, false, 0.5, -5, "rpm");
 Assert(Math.Abs(little.Decode([0x10, 0x00]) - 3) < 0.0001, "DBC little endian with scaling");
 var motorola = new DbcSignal(0x123, false, "big", 7, 16, false, false, 1, 0, "");
@@ -127,6 +219,22 @@ lessonDecision.Lessons[0].EvidenceIds = currentEvidence.Select(e => e.Id).ToList
 Assert(testSkills.Learn(demo, demo.Steps[0], lessonDecision, currentEvidence) == 0, "Demo results never enter the real test skill library");
 await bridge.DecideAsync(bridgeRun, bridgeRun.Steps[0], currentEvidence, CancellationToken.None);
 Assert(Directory.EnumerateFiles(Path.Combine(bridgeRun.Directory, "ai"), "skills.json", SearchOption.AllDirectories).Any(p => File.ReadAllText(p).Contains("Fixture-only special case")), "The next analysis receives the newly learned lesson");
+var followup = new StepRecord { Id = "S02", Title = "Verify final state", Expected = "Use completed progress and current evidence" };
+bridgeRun.Steps.Add(followup);
+bridgeRun.Steps.Add(new StepRecord { Id = "S03", Title = "Not executed yet" });
+await bridge.DecideAsync(bridgeRun, followup, currentEvidence, CancellationToken.None);
+var followupPrompt = Directory.EnumerateFiles(Path.Combine(bridgeRun.Directory, "ai"), "prompt.txt", SearchOption.AllDirectories)
+    .Select(File.ReadAllText).Single(p => p.Contains("Use completed progress and current evidence"));
+var contextText = followupPrompt.Split("输入上下文：", 2)[1].Split("\n测试分析技能及补充资料", 2)[0].Trim();
+using (var contextDoc = System.Text.Json.JsonDocument.Parse(contextText))
+{
+    var history = contextDoc.RootElement.GetProperty("previousSteps");
+    Assert(history.GetArrayLength() == 1 && history[0].GetProperty("id").GetString() == "S01"
+        && history[0].GetProperty("outcome").GetString() == "Passed"
+        && history[0].GetProperty("actual").GetString() == bridgeRun.Steps[0].Actual
+        && history[0].GetProperty("evidenceIds").GetArrayLength() > 0,
+        "Follow-up analysis receives completed findings and evidence provenance without current or future steps");
+}
 var otherBench = Json.Read<AppSettings>(Json.Serialize(bridgeSettings)); otherBench.ProjectContext = "different bench";
 Assert(!Json.Serialize(testSkills.Snapshot(otherBench)).Contains("Fixture-only special case"), "Learned lessons are isolated from other bench configurations");
 var learnedItem = testSkills.ReadLessons()[0]; testSkills.UpdateLesson(learnedItem.Id, "edited condition", "edited guidance");
